@@ -21,15 +21,14 @@ Shnex 的「内置智能补齐」本质上是 **Shell 提示符补全器**，但
 
 让系统顺应用户所处的真实上下文自动进退——**只在真实 Shell 提示符激活补全，首词斜杠命令不走根目录路径补全**。
 
-### 3.1 前端：只在真实 Shell 提示符激活补全
+### 3.1 前端：不猜 TUI，只清理旧提示符锚点
 
-涉及文件：[`desktop/frontend/src/components/TerminalPane.tsx`](../desktop/frontend/src/components/TerminalPane.tsx)、[`mobile/android/app/src/main/java/dev/shnex/app/terminal/AnsiTerminalBuffer.kt`](../mobile/android/app/src/main/java/dev/shnex/app/terminal/AnsiTerminalBuffer.kt)
+> 实现时修订：冲突只来自「首词是单段斜杠命令」，而不是「光标位于 Claude Code 输入框」。在 TUI 输入框内整体关闭补全，会误伤 Claude Code 里同样有用的 `cd /`、`./src/` 等路径补全，因此前端不再做框线 / 裸 `❯` 的 TUI 识别，斜杠命令的退让完全交给 3.2 的后端规则（候选为空 → 不弹浮层、不拦截按键）。
 
-1. **交互式 TUI 输入框自动退让**：在 `extractCommandBeforeCursor`（及移动端 `currentInputLineBeforeCursor`）中围绕光标所在绝对行 `absRow = buf.baseY + buf.cursorY` 做上下文判定（在 `tmux` 竖向分屏时先按 `│` / `┃` 切出当前窗格片段）：
-   - **框线 / 上下分隔线检测**：若 `absRow` 上方（`absRow - 1` .. `absRow - 8`）与下方（`absRow + 1` .. `absRow + 8`）**同时**出现水平分隔线或框线（不少于 6 个连续 `─━═┄┈╌╍`，或 `╭╰┌└` 起头的框线），或当前行被竖向框线 `│...│` 包裹，直接返回 `null`（补全静默，不拦截任何按键）。
-   - **裸 `❯`/`➜` 提示符下行内容校验**：若仅由裸 `❯`/`➜` 匹配（符号前无非空白 Shell 前缀，如无 `user@host`、路径段或 Powerline 段），且紧邻下一行（`absRow + 1`，非自动折行延续、且非 `tmux` 底部状态栏）存在非空 TUI 内容（如分隔线、斜杠命令菜单、底部状态提示），判定为交互式 TUI，返回 `null`。
-2. **清理旧 `OSC 133;B` 锚点**：在按下 `Enter`、`Ctrl+C` 或向 PTY 发送 `\r`/`\n` 时同步清空 `promptAnchorRef.current = null`，防止进入 TUI 后误命中旧 Shell 提示符行号。
-3. **自然恢复**：退出 Claude Code 回到 bash / zsh / PowerShell（含 `tmux` 窗格）后，下一行回到真实 Shell 提示符，智能补齐自动恢复生效。
+涉及文件：[`desktop/frontend/src/components/TerminalPane.tsx`](../desktop/frontend/src/components/TerminalPane.tsx)
+
+1. **清理旧 `OSC 133;B` 锚点**：向 PTY 发送 `\r`/`\n`（Enter）或 `\x03`（Ctrl+C）时同步清空 `promptAnchorRef.current = null`，防止进入 TUI 后误命中旧 Shell 提示符行号。
+2. **Android 端无需改动**：移动端补全读取的是输入框草稿（`WorkbenchViewModel.queryInputCompletions`），走同一个后端引擎；`AnsiTerminalBuffer.currentInputLineBeforeCursor` 当前无调用方。
 
 ### 3.2 后端引擎：首词斜杠命令不触发根目录路径补全
 
@@ -49,5 +48,6 @@ Shnex 的「内置智能补齐」本质上是 **Shell 提示符补全器**，但
 1. `cd core && go test ./...` 全部通过（含新增斜杠命令与路径边界单元测试）。
 2. `cd desktop/frontend && npx tsc --noEmit` 类型检查零报错。
 3. 在本地 PowerShell、远程 SSH Linux 及 `tmux` 分屏会话内启动 Claude Code：
-   - 输入 `/`、`/model`、`/help`、`git `、`./src/` 时，Shnex 不弹出补全浮层、不显示灰字，也不拦截 `↑`/`↓`/`Tab`/`Enter`/`Esc`，Claude 原生命令列表正常展示与选择。
+   - 输入 `/`、`/model`、`/help`、`/resume` 时，Shnex 不弹出补全浮层、不显示灰字，也不拦截 `↑`/`↓`/`Tab`/`Enter`/`Esc`，Claude 原生命令列表正常展示与选择。
+   - 输入 `cd /`、`./src/` 时，Shnex 照常给出路径补全。
    - 退出 Claude Code 回到 Shell 提示符后，`cd /`、`ls /`、`./`、`git checkout ` 等本地/远端智能补齐立即正常工作。

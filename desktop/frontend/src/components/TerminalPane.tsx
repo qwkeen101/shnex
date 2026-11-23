@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Terminal, type IBuffer } from "@xterm/xterm";
+import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -443,65 +443,6 @@ export const TerminalPane: React.FC<Props> = ({
     syncImeAnchorFnRef.current = syncImeCursorAnchor;
     requestAnimationFrame(syncImeCursorAnchor);
 
-    // Interactive TUIs (Claude Code, Codex, Gemini CLI) draw their input box between
-    // horizontal rules / box borders. Shell completion steps aside there.
-    const TUI_RULE_RE = /[─━═┄┈╌╍]{6,}|^\s*[╭╰┌└]/;
-    const BARE_ARROW_PROMPT_RE = /^\s*(?:❯|➜)\s/;
-    const TUI_SCAN_ROWS = 8;
-    const isPaneBorderChar = (ch: string | undefined) => ch === "│" || ch === "┃";
-
-    const isInsideTuiInputBox = (buf: IBuffer, absRow: number, cursorX: number): boolean => {
-      const lineObj = buf.getLine(absRow);
-      if (!lineObj) return false;
-      // Restrict to the current tmux pane (or TUI box) column range.
-      let segStart = 0;
-      for (let x = Math.min(cursorX, term.cols) - 1; x >= 0; x--) {
-        if (isPaneBorderChar(lineObj.getCell(x)?.getChars())) {
-          segStart = x + 1;
-          break;
-        }
-      }
-      let segEnd = term.cols;
-      for (let x = cursorX; x < term.cols; x++) {
-        if (isPaneBorderChar(lineObj.getCell(x)?.getChars())) {
-          segEnd = x;
-          break;
-        }
-      }
-      const rowText = (row: number) =>
-        buf.getLine(row)?.translateToString(true, segStart, segEnd) ?? "";
-
-      let ruleAbove = false;
-      let ruleBelow = false;
-      for (let d = 1; d <= TUI_SCAN_ROWS && !(ruleAbove && ruleBelow); d++) {
-        if (!ruleAbove && absRow - d >= 0 && TUI_RULE_RE.test(rowText(absRow - d))) {
-          ruleAbove = true;
-        }
-        if (!ruleBelow && absRow + d < buf.length && TUI_RULE_RE.test(rowText(absRow + d))) {
-          ruleBelow = true;
-        }
-      }
-      if (ruleAbove && ruleBelow) return true;
-
-      // A bare `❯` / `➜` (no user@host / path / Powerline segment before it) followed by
-      // non-empty content on the next row is a TUI prompt, not a shell prompt.
-      const beforeCursor = lineObj.translateToString(false, segStart, cursorX);
-      if (BARE_ARROW_PROMPT_RE.test(beforeCursor)) {
-        const nextRow = absRow + 1;
-        const nextLine = buf.getLine(nextRow);
-        const isLastScreenRow = nextRow === buf.baseY + term.rows - 1; // tmux status bar
-        if (
-          nextLine &&
-          !nextLine.isWrapped &&
-          !isLastScreenRow &&
-          rowText(nextRow).trim().length > 0
-        ) {
-          return true;
-        }
-      }
-      return false;
-    };
-
     const extractCommandBeforeCursor = (): string | null => {
       const buf = term.buffer.active;
       // In normal buffer, suppress completion while user scrolls up through history.
@@ -528,8 +469,6 @@ export const TerminalPane: React.FC<Props> = ({
       ) {
         return lineObj.translateToString(false, anchor.col, cursorX);
       }
-
-      if (isInsideTuiInputBox(buf, absRow, cursorX)) return null;
 
       const rawBefore = lineObj.translateToString(false, 0, cursorX);
       const psDirMatch = rawBefore.match(/^PS ([A-Za-z]:[^>]+)>/);
