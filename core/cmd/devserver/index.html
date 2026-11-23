@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shnex Core DevServer · 本地桥接验证终端</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
+    aside {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      padding: 14px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .badge {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #21262d;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .badge.ok { color: var(--ok); border-color: rgba(63,185,80,0.4); }
+    .section {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(13,17,23,0.55);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .section-title {
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    input, select, textarea {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    textarea {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      min-height: 62px;
+      resize: vertical;
+    }
+    .check {
+      flex-direction: row;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    button {
+      background: #21262d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: #1f6feb; border-color: #388bfd; font-weight: 600; }
+    button.danger { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.5); color: #ff7b72; }
+    main {
+      display: grid;
+      grid-template-rows: 40px 1fr 110px;
+      height: 100vh;
+      min-width: 0;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    #term-wrap {
+      position: relative;
+      background: #000;
+      padding: 6px;
+      overflow: hidden;
+    }
+    #terminal { width: 100%; height: 100%; }
+    #fallback-term {
+      display: none;
+      width: 100%;
+      height: 100%;
+      flex-direction: column;
+      gap: 6px;
+    }
+    #fallback-out {
+      flex: 1;
+      margin: 0;
+      padding: 8px;
+      overflow: auto;
+      background: #05070a;
+      color: #d1d7e0;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    #event-log {
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .ev-line { margin-bottom: 3px; }
+    .ev-bell { color: var(--warn); }
+    .ev-idle { color: var(--ok); }
+    .ev-err { color: var(--err); }
+    .node-item {
+      padding: 4px 6px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .node-item:hover { border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>
+      <span>Shnex Core Dev</span>
+      <span id="core-badge" class="badge">未验证</span>
+    </h1>
+
+    <div class="section">
+      <div class="section-title">1. 本地回环 Bearer 鉴权</div>
+      <label>
+        Auth Token (32-Byte Hex)
+        <input id="token" type="password" placeholder="从启动终端复制或通过 #token= 自动填充" />
+      </label>
+      <div class="btn-row">
+        <button onclick="checkHealth()">检查 /health</button>
+        <button onclick="triggerNetChange()">模拟切网唤醒</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">2. SSH 终端会话配置</div>
+      <div class="row">
+        <label>
+          目标主机 (Host:Port)
+          <input id="target" type="text" placeholder="192.168.1.10:22" />
+        </label>
+        <label>
+          用户名
+          <input id="user" type="text" value="root" />
+        </label>
+      </div>
+
+      <label>
+        认证方式
+        <select id="auth-mode" onchange="syncAuthUI()">
+          <option value="password">密码认证 (Password / PAM)</option>
+          <option value="private_key">私钥认证 (PEM)</option>
+          <option value="tailscale_ssh">Tailscale SSH (tsnet 免密)</option>
+        </select>
+      </label>
+
+      <div class="row">
+        <label>
+          接力持久化模式
+          <select id="relay-mode">
+            <option value="auto">Auto (tmux/zellij/Shell)</option>
+            <option value="none">None (普通单次 Shell)</option>
+            <option value="tmux">tmux 工作区</option>
+            <option value="zellij">zellij 工作区</option>
+            <option value="shnex_agent">shnex-agent 远端守护</option>
+          </select>
+        </label>
+        <label>
+          工作区名称
+          <input id="relay-session" type="text" value="shnex-main" />
+        </label>
+      </div>
+
+      <div id="pw-box">
+        <label>
+          SSH 密码
+          <input id="password" type="password" placeholder="输入远端密码" />
+        </label>
+      </div>
+
+      <div id="key-box" style="display:none; flex-direction:column; gap:6px;">
+        <label>
+          私钥内容 (OpenSSH / PEM)
+          <textarea id="privkey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+        </label>
+        <label>
+          私钥口令 (可选)
+          <input id="passphrase" type="password" />
+        </label>
+      </div>
+
+      <label>
+        代理路由 (可选 SOCKS5 / HTTP CONNECT)
+        <input id="proxy-url" type="text" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890" />
+      </label>
+
+      <label class="check">
+        <input id="use-tsnet" type="checkbox" />
+        <span>通过用户态 tsnet 虚拟网卡拨号</span>
+      </label>
+
+      <label>
+        固定主机指纹 (可选 SHA256:...)
+        <input id="pinned-fp" type="text" placeholder="留空则使用下方开发联调开关" />
+      </label>
+
+      <label class="check">
+        <input id="insecure-hk" type="checkbox" checked />
+        <span>跳过 HostKey 校验 (仅开发测试)</span>
+      </label>
+
+      <div class="row">
+        <label>
+          输出静默阈值 (ms)
+          <input id="silence-ms" type="number" value="5000" min="0" step="500" />
+        </label>
+        <label>
+          心跳间隔 (秒)
+          <input id="ka-sec" type="number" value="15" min="5" />
+        </label>
+      </div>
+
+      <label class="check">
+        <input id="notify-idle" type="checkbox" checked />
+        <span>开启 BEL / Claude 待审批 / 完工静默通知</span>
+      </label>
+
+      <div class="btn-row">
+        <button class="primary" onclick="connectSession()">连接终端</button>
+        <button class="danger" onclick="disconnectSession()">断开会话</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">3. Tailnet (Tailscale / Headscale)</div>
+      <label>
+        ControlURL (留空=官方 Tailscale，可填 Headscale)
+        <input id="ts-control" type="text" placeholder="https://headscale.example.com" />
+      </label>
+      <label>
+        AuthKey (留空则走交互式 URL 登录)
+        <input id="ts-authkey" type="password" placeholder="tskey-auth-..." />
+      </label>
+      <div class="btn-row">
+        <button onclick="tailnetUp()">启动 tsnet</button>
+        <button onclick="tailnetNodes()">列出在线节点</button>
+        <button onclick="tailnetDown()">停止</button>
+      </div>
+      <div id="ts-info" style="font-size:11px; color:var(--muted); word-break:break-all;"></div>
+      <div id="ts-nodes" style="display:flex; flex-direction:column; gap:4px;"></div>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span id="sess-status" class="badge">未连接</span>
+        <span id="dims-badge" class="badge">-- x --</span>
+        <span id="rtt-badge" class="badge">SSH RTT: --</span>
+      </div>
+      <div class="btn-row">
+        <button onclick="sendPing()">探测 SSH RTT</button>
+        <button onclick="clearLog()">清空事件日志</button>
+      </div>
+    </header>
+
+    <div id="term-wrap">
+      <div id="terminal"></div>
+      <div id="fallback-term">
+        <pre id="fallback-out"></pre>
+        <input id="fallback-in" type="text" placeholder="离线兜底终端：输入命令按回车发送..." />
+      </div>
+    </div>
+
+    <div id="event-log"></div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script>
+    const OP_DATA = 0x00;
+    const OP_RESIZE = 0x01;
+    const OP_PING = 0x02;
+    const OP_PONG = 0x03;
+    const OP_EVENT = 0x04;
+
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    let term = null;
+    let fitAddon = null;
+    let ws = null;
+    let currentSessionId = null;
+
+    function logEvent(msg, cls = "") {
+      const box = document.getElementById("event-log");
+      const div = document.createElement("div");
+      div.className = "ev-line " + cls;
+      const ts = new Date().toLocaleTimeString();
+      div.textContent = `[${ts}] ${msg}`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function clearLog() {
+      document.getElementById("event-log").innerHTML = "";
+    }
+
+    function getToken() {
+      return document.getElementById("token").value.trim();
+    }
+
+    async function apiFetch(path, method = "GET", body = null) {
+      const headers = { "Authorization": "Bearer " + getToken() };
+      if (body !== null) headers["Content-Type"] = "application/json";
+      const res = await fetch(path, {
+        method,
+        headers,
+        body: body !== null ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data;
+    }
+
+    function syncAuthUI() {
+      const mode = document.getElementById("auth-mode").value;
+      document.getElementById("pw-box").style.display = mode === "password" ? "block" : "none";
+      document.getElementById("key-box").style.display = mode === "private_key" ? "flex" : "none";
+      if (mode === "tailscale_ssh") {
+        document.getElementById("use-tsnet").checked = true;
+      }
+    }
+
+    function initTerminal() {
+      if (window.Terminal && window.FitAddon) {
+        term = new window.Terminal({
+          cursorBlink: true,
+          fontSize: 14,
+          fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, monospace',
+          theme: { background: "#000000" },
+        });
+        fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById("terminal"));
+        fitAddon.fit();
+        updateDimsBadge(term.cols, term.rows);
+
+        term.onData((data) => {
+          sendBinaryData(encoder.encode(data));
+        });
+
+        const ro = new ResizeObserver(() => {
+          if (!fitAddon || !term) return;
+          fitAddon.fit();
+          updateDimsBadge(term.cols, term.rows);
+          sendResizeFrame(term.cols, term.rows);
+        });
+        ro.observe(document.getElementById("term-wrap"));
+      } else {
+        document.getElementById("terminal").style.display = "none";
+        const fb = document.getElementById("fallback-term");
+        fb.style.display = "flex";
+        const fbIn = document.getElementById("fallback-in");
+        fbIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            sendBinaryData(encoder.encode(fbIn.value + "\n"));
+            fbIn.value = "";
+          }
+        });
+        logEvent("CDN 未加载，已启用离线兜底纯文本终端", "ev-bell");
+      }
+    }
+
+    function updateDimsBadge(cols, rows) {
+      document.getElementById("dims-badge").textContent = `${cols} x ${rows}`;
+    }
+
+    function writeTerminalBytes(uint8) {
+      if (term) {
+        term.write(uint8);
+      } else {
+        const out = document.getElementById("fallback-out");
+        out.textContent += decoder.decode(uint8, { stream: true });
+        out.scrollTop = out.scrollHeight;
+      }
+    }
+
+    function sendBinaryData(payloadBytes) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const frame = new Uint8Array(1 + payloadBytes.length);
+      frame[0] = OP_DATA;
+      frame.set(payloadBytes, 1);
+      ws.send(frame);
+    }
+
+    function sendResizeFrame(cols, rows) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const buf = new ArrayBuffer(5);
+      const dv = new DataView(buf);
+      dv.setUint8(0, OP_RESIZE);
+      dv.setUint16(1, cols, false);
+      dv.setUint16(3, rows, false);
+      ws.send(buf);
+    }
+
+    function sendPing() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        logEvent("尚未建立活跃 WebSocket 会话", "ev-err");
+        return;
+      }
+      const buf = new ArrayBuffer(9);
+      const dv = new DataView(buf);
+      dv.setUint8(0, OP_PING);
+      dv.setBigUint64(1, BigInt(Date.now()), false);
+      ws.send(buf);
+    }
+
+    async function checkHealth() {
+      try {
+        const h = await apiFetch("/api/v1/health");
+        const badge = document.getElementById("core-badge");
+        badge.textContent = `在线 · Gen#${h.network_generation}`;
+        badge.className = "badge ok";
+        logEvent(`Core 健康检查通过: addr=${h.listen_addr}, active=${h.active_sessions}`);
+      } catch (err) {
+        document.getElementById("core-badge").textContent = "鉴权失败";
+        logEvent("健康检查失败: " + err.message, "ev-err");
+      }
+    }
+
+    async function triggerNetChange() {
+      try {
+        const ev = await apiFetch("/api/v1/network/changed", "POST", { reason: "devserver_manual_test" });
+        logEvent(`已触发 NotifyNetworkChanged -> generation=#${ev.generation}`);
+        await checkHealth();
+      } catch (err) {
+        logEvent("触发切网通知失败: " + err.message, "ev-err");
+      }
+    }
+
+    async function connectSession() {
+      await disconnectSession();
+      if ("Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+
+      const cols = term ? term.cols : 100;
+      const rows = term ? term.rows : 30;
+      const mode = document.getElementById("auth-mode").value;
+      const notifyEnabled = document.getElementById("notify-idle").checked;
+
+      const reqBody = {
+        protocol: "ssh",
+        target: document.getElementById("target").value.trim(),
+        user: document.getElementById("user").value.trim(),
+        cols,
+        rows,
+        keepalive_sec: parseInt(document.getElementById("ka-sec").value || "15", 10),
+        silence_threshold_ms: parseInt(document.getElementById("silence-ms").value || "0", 10),
+        notify_on_bell: notifyEnabled,
+        notify_on_approval: notifyEnabled,
+        notify_on_idle: notifyEnabled,
+        relay: {
+          mode: document.getElementById("relay-mode").value,
+          session_name: document.getElementById("relay-session").value.trim(),
+        },
+        route: {
+          use_tsnet: document.getElementById("use-tsnet").checked,
+          proxy_url: document.getElementById("proxy-url").value.trim(),
+        },
+        auth: {
+          mode,
+          password: document.getElementById("password").value,
+          private_key_pem: document.getElementById("privkey").value,
+          private_key_passphrase: document.getElementById("passphrase").value,
+          host_key: {
+            pinned_sha256: document.getElementById("pinned-fp").value.trim(),
+            insecure_ignore: document.getElementById("insecure-hk").checked,
+          },
+        },
+      };
+
+      try {
+        logEvent(`正在拨号连接 ${reqBody.user}@${reqBody.target} ...`);
+        const summary = await apiFetch("/api/v1/sessions", "POST", reqBody);
+        currentSessionId = summary.id;
+        openSessionWebSocket(summary.id);
+      } catch (err) {
+        logEvent("创建会话失败: " + err.message, "ev-err");
+      }
+    }
+
+    function openSessionWebSocket(sessionId) {
+      const wsURL = `ws://${location.host}/api/v1/sessions/${encodeURIComponent(sessionId)}/ws?token=${encodeURIComponent(getToken())}`;
+      ws = new WebSocket(wsURL);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        const st = document.getElementById("sess-status");
+        st.textContent = `已连接 · ${sessionId}`;
+        st.className = "badge ok";
+        logEvent(`WebSocket 数据面已连接 (${sessionId})`);
+        if (term) {
+          term.clear();
+          term.focus();
+          sendResizeFrame(term.cols, term.rows);
+        }
+      };
+
+      ws.onmessage = (ev) => {
+        if (!(ev.data instanceof ArrayBuffer) || ev.data.byteLength === 0) return;
+        const u8 = new Uint8Array(ev.data);
+        const op = u8[0];
+        if (op === OP_DATA) {
+          writeTerminalBytes(u8.subarray(1));
+        } else if (op === OP_PONG && ev.data.byteLength >= 17) {
+          const dv = new DataView(ev.data);
+          const rttMicros = Number(dv.getBigUint64(9, false));
+          document.getElementById("rtt-badge").textContent = `SSH RTT: ${(rttMicros / 1000).toFixed(2)} ms`;
+        } else if (op === OP_EVENT) {
+          const jsonStr = decoder.decode(u8.subarray(1));
+          try {
+            const sev = JSON.parse(jsonStr);
+            handleSessionEvent(sev);
+          } catch (_) {}
+        }
+      };
+
+      ws.onclose = () => {
+        const st = document.getElementById("sess-status");
+        st.textContent = "已断开";
+        st.className = "badge";
+        logEvent(`WebSocket 通道已关闭 (${sessionId})`);
+      };
+    }
+
+    function handleSessionEvent(sev) {
+      if (sev.type === "keepalive_rtt" && sev.rtt_ns) {
+        document.getElementById("rtt-badge").textContent = `SSH RTT: ${(sev.rtt_ns / 1e6).toFixed(2)} ms`;
+        return;
+      }
+      if (sev.type === "bell") {
+        logEvent("🔔 检测到终端独立响铃 (BEL)", "ev-bell");
+        maybeBrowserNotify("终端响铃", "远端终端发出了响铃提醒");
+      } else if (sev.type === "ai_approval_required") {
+        logEvent(`⚠️ [Claude 待人工审批] ${sev.prompt_snippet || sev.message}`, "ev-err");
+        maybeBrowserNotify("Claude 等待权限确认", sev.prompt_snippet || "远端 AI CLI 请求确认操作");
+      } else if (sev.type === "output_silence") {
+        logEvent(`✨ [任务完工静默] 本轮活跃输出 ${sev.burst_bytes} B 后已静默 ${(sev.quiet_for_ns / 1e6).toFixed(0)} ms`, "ev-idle");
+        maybeBrowserNotify("任务输出完成", "Claude CLI / 远端命令已完成当前轮输出并等待输入");
+      } else if (sev.type === "relay_attached") {
+        logEvent(`🔗 [接力会话已挂载] (${sev.relay_backend}) ${sev.message}`, "ev-idle");
+      } else if (sev.type === "network_probed") {
+        logEvent(`🔄 切网即时心跳探测成功: RTT=${(sev.rtt_ns / 1e6).toFixed(2)} ms (${sev.message})`, "ev-idle");
+      } else {
+        logEvent(`事件 [${sev.type}]: ${sev.message || ""}`);
+      }
+    }
+
+    function maybeBrowserNotify(title, body) {
+      if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+        new Notification(title, { body });
+      }
+    }
+
+    async function disconnectSession() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      if (currentSessionId) {
+        const id = currentSessionId;
+        currentSessionId = null;
+        try {
+          await apiFetch(`/api/v1/sessions/${encodeURIComponent(id)}`, "DELETE");
+          logEvent(`已销毁远端会话 ${id}`);
+        } catch (_) {}
+      }
+    }
+
+    async function tailnetUp() {
+      try {
+        logEvent("正在启动用户态 tsnet ...");
+        const st = await apiFetch("/api/v1/tailnet/up", "POST", {
+          hostname: "shnex-dev",
+          control_url: document.getElementById("ts-control").value.trim(),
+          auth_key: document.getElementById("ts-authkey").value.trim(),
+        });
+        renderTailnetStatus(st);
+      } catch (err) {
+        logEvent("启动 tsnet 失败: " + err.message, "ev-err");
+      }
+    }
+
+    async function tailnetNodes() {
+      try {
+        const st = await apiFetch("/api/v1/tailnet/status");
+        renderTailnetStatus(st);
+        const res = await apiFetch("/api/v1/tailnet/nodes?online=true");
+        const box = document.getElementById("ts-nodes");
+        box.innerHTML = "";
+        (res.nodes || []).forEach((n) => {
+          const div = document.createElement("div");
+          div.className = "node-item";
+          const addr = n.magic_dns_name || (n.tailscale_ips && n.tailscale_ips[0]) || n.hostname;
+          div.textContent = `${n.hostname} (${addr}) [${n.os}]`;
+          div.onclick = () => {
+            document.getElementById("target").value = addr + ":22";
+            document.getElementById("use-tsnet").checked = true;
+            logEvent(`已填充 Tailnet 节点: ${addr}:22`);
+          };
+          box.appendChild(div);
+        });
+        logEvent(`获取到 ${(res.nodes || []).length} 个在线 Tailnet 节点`);
+      } catch (err) {
+        logEvent("查询 Tailnet 节点失败: " + err.message, "ev-err");
+      }
+    }
+
+    async function tailnetDown() {
+      try {
+        await apiFetch("/api/v1/tailnet/down", "POST", {});
+        document.getElementById("ts-info").textContent = "已停止";
+        document.getElementById("ts-nodes").innerHTML = "";
+        logEvent("已停止 tsnet");
+      } catch (err) {
+        logEvent("停止 tsnet 失败: " + err.message, "ev-err");
+      }
+    }
+
+    function renderTailnetStatus(st) {
+      const box = document.getElementById("ts-info");
+      box.innerHTML = "";
+      const text = document.createElement("div");
+      text.textContent = `状态: ${st.backend_state} | MagicDNS: ${st.magic_dns_suffix || "-"}`;
+      box.appendChild(text);
+      if (st.auth_url) {
+        const a = document.createElement("a");
+        a.href = st.auth_url;
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        a.style.color = "var(--accent)";
+        a.textContent = "点击打开浏览器完成交互登录授权 ->";
+        box.appendChild(a);
+      }
+    }
+
+    (function bootstrap() {
+      const hash = window.location.hash || "";
+      const m = hash.match(/token=([a-fA-F0-9]+)/);
+      if (m) {
+        document.getElementById("token").value = m[1];
+        sessionStorage.setItem("shnex_dev_token", m[1]);
+      } else if (sessionStorage.getItem("shnex_dev_token")) {
+        document.getElementById("token").value = sessionStorage.getItem("shnex_dev_token");
+      }
+      initTerminal();
+      if (getToken()) {
+        checkHealth();
+      }
+    })();
+  </script>
+</body>
+</html>

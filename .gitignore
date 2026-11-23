@@ -1,0 +1,80 @@
+# ==============================================================================
+# Shnex Monorepo .gitignore
+# Security Redlines: NEVER commit private keys, .env, or Tailscale/tsnet states.
+# ==============================================================================
+
+# --- Secrets, Credentials & Environment Variables ---
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+credentials.json
+auth-token.txt
+
+# --- SSH Keys, Certificates & Host Trust Files ---
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+*.crt
+*.der
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+known_hosts
+known_hosts.*
+authorized_keys
+
+# --- Tailscale / tsnet / Headscale Runtime State ---
+tsnet-state/
+.tsnet/
+tailscale-state/
+*tailscaled.state*
+*.tsnet.state
+tailscaled.log*
+
+# --- Go Build & Test Artifacts ---
+bin/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+go.work.sum
+
+# --- Future Desktop Shell (Wails v3 / Node) ---
+node_modules/
+desktop/build/
+desktop/frontend/dist/
+*.tsbuildinfo
+
+# --- Future Mobile Shell (Android / Gradle / gomobile) ---
+.gradle/
+local.properties
+*.apk
+*.aab
+*.aar
+*.jar
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.cxx/
+
+# --- IDE, Editor & OS Files ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

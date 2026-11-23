@@ -1,0 +1,2 @@
+-keep class mobilebridge.** { *; }
+-keep class go.** { *; }
