@@ -206,6 +206,8 @@ export const TerminalPane: React.FC<Props> = ({
   const lastQueriedLineRef = useRef("");
   const compRafRef = useRef<number | null>(null);
   const popupListRef = useRef<HTMLDivElement | null>(null);
+  const isImeComposingRef = useRef(false);
+  const syncImeAnchorFnRef = useRef<() => void>(() => {});
 
   const syncCompState = (patch: Partial<ActiveCompletionState>) => {
     compRef.current = { ...compRef.current, ...patch };
@@ -375,20 +377,91 @@ export const TerminalPane: React.FC<Props> = ({
       };
     };
 
+    // Proactively anchor xterm's hidden IME <textarea> and inline .composition-view
+    // right on the live cursor cell so Windows TSF / IMM32 never sees an off-screen
+    // (-9999em) or 0x0 caret rect on WM_IME_STARTCOMPOSITION.
+    const syncImeCursorAnchor = () => {
+      const textarea = term.textarea;
+      const screenEl = el.querySelector(".xterm-screen") as HTMLElement | null;
+      if (!textarea || !screenEl) return;
+      const helpersEl = textarea.parentElement as HTMLElement | null;
+      const screenRect = screenEl.getBoundingClientRect();
+      const helpersRect = helpersEl
+        ? helpersEl.getBoundingClientRect()
+        : screenRect;
+      const w = screenRect.width || el.clientWidth || 640;
+      const h = screenRect.height || el.clientHeight || 380;
+      const cellW = Math.max(7, w / Math.max(1, term.cols));
+      const cellH = Math.max(16, h / Math.max(1, term.rows));
+      const col = Math.min(
+        Math.max(0, term.buffer.active.cursorX),
+        Math.max(0, term.cols - 1)
+      );
+      const row = Math.min(
+        Math.max(0, term.buffer.active.cursorY),
+        Math.max(0, term.rows - 1)
+      );
+      const leftPx = Math.max(
+        0,
+        Math.round(screenRect.left - helpersRect.left + col * cellW)
+      );
+      const topPx = Math.max(
+        0,
+        Math.round(screenRect.top - helpersRect.top + row * cellH)
+      );
+
+      const compView = el.querySelector(
+        ".composition-view"
+      ) as HTMLElement | null;
+      const isComposing =
+        isImeComposingRef.current ||
+        (compView?.classList.contains("active") ?? false);
+
+      if (compView) {
+        compView.style.left = `${leftPx}px`;
+        compView.style.top = `${topPx}px`;
+        compView.style.height = `${Math.round(cellH)}px`;
+        compView.style.lineHeight = `${Math.round(cellH)}px`;
+        compView.style.fontSize = `${
+          terminalCfgRef.current?.font_size ?? 13.5
+        }px`;
+      }
+
+      const compWidth =
+        isComposing && compView ? Math.max(compView.offsetWidth, cellW) : cellW;
+      textarea.style.left = `${leftPx}px`;
+      textarea.style.top = `${topPx}px`;
+      textarea.style.width = `${Math.max(10, Math.round(compWidth))}px`;
+      textarea.style.height = `${Math.max(16, Math.round(cellH))}px`;
+      textarea.style.lineHeight = `${Math.max(16, Math.round(cellH))}px`;
+    };
+    syncImeAnchorFnRef.current = syncImeCursorAnchor;
+    requestAnimationFrame(syncImeCursorAnchor);
+
     const extractCommandBeforeCursor = (): string | null => {
       const buf = term.buffer.active;
-      if (buf.type !== "normal" || buf.viewportY !== buf.baseY) return null;
+      // In normal buffer, suppress completion while user scrolls up through history.
+      // Allow alternate buffer (`buf.type === "alternate"`) so SSH sessions attached
+      // to `tmux` / `screen` / `zellij` get full native completion on prompt lines!
+      if (buf.type === "normal" && buf.viewportY !== buf.baseY) return null;
       const absRow = buf.baseY + buf.cursorY;
       const cursorX = buf.cursorX;
       const lineObj = buf.getLine(absRow);
       if (!lineObj) return null;
 
       // Do not show inline completion when text exists to the right of cursor
-      const rightText = lineObj.translateToString(true, cursorX);
-      if (rightText.trim().length > 0) return null;
+      // (ignoring tmux vertical split borders `│` / `┃`).
+      const rightRaw = lineObj.translateToString(true, cursorX);
+      const rightBeforePaneBorder = rightRaw.split(/[│┃]/)[0] ?? rightRaw;
+      if (rightBeforePaneBorder.trim().length > 0) return null;
 
       const anchor = promptAnchorRef.current;
-      if (anchor && anchor.row === absRow && cursorX >= anchor.col) {
+      if (
+        buf.type === "normal" &&
+        anchor &&
+        anchor.row === absRow &&
+        cursorX >= anchor.col
+      ) {
         return lineObj.translateToString(false, anchor.col, cursorX);
       }
 
@@ -400,18 +473,45 @@ export const TerminalPane: React.FC<Props> = ({
         const cmdDirMatch = rawBefore.match(/^([A-Za-z]:\\[^>]+)>/);
         if (cmdDirMatch?.[1]) {
           lastReportedDirRef.current = cmdDirMatch[1].trim();
+        } else {
+          const linuxDirMatch =
+            rawBefore.match(
+              /^(?:\([^)\r\n]+\)\s*)*[^\s@:\r\n]+@[^\s:\r\n]+:((?:~|\/)[^$#%\r\n]*)[$#%]\s/
+            ) ||
+            rawBefore.match(
+              /^(?:\([^)\r\n]+\)\s*)*\[[^\]\r\n]+@[^\s\]\r\n]+\s+([^\]]+)\][$#%]\s/
+            );
+          if (linuxDirMatch?.[1]) {
+            const p = linuxDirMatch[1].trim();
+            if (p === "~") {
+              lastReportedDirRef.current = ".";
+            } else if (p.startsWith("~/")) {
+              lastReportedDirRef.current = p.slice(2);
+            } else if (p.startsWith("/")) {
+              lastReportedDirRef.current = p;
+            }
+          }
         }
       }
-      const promptPatterns = [
+
+      const strictPromptPatterns = [
         /^PS [A-Za-z]:[^>]*>\s?/,
         /^[A-Za-z]:\\[^>]*>/,
+        /^(?:\([^)\r\n]+\)\s*)*[^\s@:\r\n]+@[^\s:\r\n]+:[^\r\n]*?[$#%]\s/,
+        /^(?:\([^)\r\n]+\)\s*)*\[[^\]\r\n]+@[^\]\r\n]+\][^\r\n]*?[$#%]\s/,
+        /^(?:bash|sh|zsh|fish)(?:-[0-9.]+)?[$#%]\s/,
         /^.*?(?:❯|➜)\s/,
-        /^[^\r\n]*?(?:[$#%])\s/,
       ];
-      for (const re of promptPatterns) {
+      for (const re of strictPromptPatterns) {
         const m = rawBefore.match(re);
         if (m) {
           return rawBefore.slice(m[0].length);
+        }
+      }
+      if (buf.type === "normal") {
+        const fallback = rawBefore.match(/^[^\r\n]{1,80}?[$#%]\s/);
+        if (fallback) {
+          return rawBefore.slice(fallback[0].length);
         }
       }
       return null;
@@ -424,6 +524,7 @@ export const TerminalPane: React.FC<Props> = ({
       compRafRef.current = window.requestAnimationFrame(async () => {
         compRafRef.current = null;
         if (unmounted) return;
+        if (isImeComposingRef.current) return;
         if (!(terminalCfgRef.current?.completion_enabled ?? true)) {
           if (compRef.current.candidates.length > 0) clearCompletionState(null);
           return;
@@ -460,12 +561,18 @@ export const TerminalPane: React.FC<Props> = ({
             return;
           }
           const mode = terminalCfgRef.current?.completion_mode || "hybrid";
+          const isArgOrPathCompletion =
+            /\s/.test(cmdLine) ||
+            cmdLine.startsWith(".") ||
+            cmdLine.includes("/") ||
+            cmdLine.includes("\\");
           syncCompState({
             line: cmdLine,
             tokenPrefix: res.token_prefix || "",
             candidates: cands,
             selectedIndex: 0,
-            listOpen: mode === "list",
+            listOpen:
+              mode === "list" || (mode === "hybrid" && isArgOrPathCompletion),
             explicitlyNavigated: false,
             dismissedLine:
               compRef.current.dismissedLine === cmdLine ? cmdLine : null,
@@ -480,6 +587,16 @@ export const TerminalPane: React.FC<Props> = ({
     };
 
     term.attachCustomKeyEventHandler((ev) => {
+      // Never intercept keys while Windows / macOS / Linux IME is actively composing
+      // (e.g. Microsoft Pinyin, Sogou, WeChat IME, Rime selecting candidates 1-9 / Space / Enter / Esc / Tab).
+      if (
+        isImeComposingRef.current ||
+        ev.isComposing ||
+        ev.keyCode === 229 ||
+        ev.key === "Process"
+      ) {
+        return true;
+      }
       if (ev.type !== "keydown") return true;
 
       const compEnabled = terminalCfgRef.current?.completion_enabled ?? true;
@@ -552,15 +669,24 @@ export const TerminalPane: React.FC<Props> = ({
             }
             if (ev.key === "Tab") {
               ev.preventDefault();
-              syncCompState({ listOpen: true, selectedIndex: 0 });
+              syncCompState({
+                listOpen: true,
+                selectedIndex: 0,
+                explicitlyNavigated: true,
+              });
               return false;
             }
           } else {
             if (ev.key === "Tab") {
               ev.preventDefault();
+              if (len === 1 && !ev.shiftKey && activeCand) {
+                acceptCandidate(activeCand);
+                return false;
+              }
               const delta = ev.shiftKey ? -1 : 1;
               syncCompState({
                 selectedIndex: (st.selectedIndex + delta + len) % len,
+                explicitlyNavigated: true,
               });
               return false;
             }
@@ -568,6 +694,7 @@ export const TerminalPane: React.FC<Props> = ({
               ev.preventDefault();
               syncCompState({
                 selectedIndex: (st.selectedIndex + 1) % len,
+                explicitlyNavigated: true,
               });
               return false;
             }
@@ -575,13 +702,25 @@ export const TerminalPane: React.FC<Props> = ({
               ev.preventDefault();
               syncCompState({
                 selectedIndex: (st.selectedIndex - 1 + len) % len,
+                explicitlyNavigated: true,
               });
               return false;
             }
+            if (ev.key === "ArrowRight" && !ev.shiftKey && activeCand) {
+              ev.preventDefault();
+              acceptCandidate(activeCand);
+              return false;
+            }
+            const isBareRequiredArg =
+              st.tokenPrefix === "" &&
+              /^(?:cd|pushd|cat|nvim|vim|vi|nano|code|ssh|scp|sftp)\s+$/i.test(
+                st.line
+              );
             if (
-              (ev.key === "Enter" || ev.key === "ArrowRight") &&
+              ev.key === "Enter" &&
               !ev.shiftKey &&
-              activeCand
+              activeCand &&
+              (st.explicitlyNavigated || isBareRequiredArg)
             ) {
               ev.preventDefault();
               acceptCandidate(activeCand);
@@ -636,12 +775,51 @@ export const TerminalPane: React.FC<Props> = ({
     });
 
     const writeParsedDisp = term.onWriteParsed(() => {
+      syncImeCursorAnchor();
       scheduleCompletionRefresh();
     });
 
     const cursorMoveDisp = term.onCursorMove(() => {
+      syncImeCursorAnchor();
       scheduleCompletionRefresh();
     });
+
+    const renderDisp = term.onRender(() => {
+      syncImeCursorAnchor();
+    });
+
+    const scrollDisp = term.onScroll(() => {
+      syncImeCursorAnchor();
+    });
+
+    const helperTextarea = term.textarea;
+    const handleImeFocus = () => {
+      syncImeCursorAnchor();
+    };
+    const handleImeStart = () => {
+      isImeComposingRef.current = true;
+      clearCompletionState(null);
+      syncImeCursorAnchor();
+      requestAnimationFrame(syncImeCursorAnchor);
+    };
+    const handleImeUpdate = () => {
+      isImeComposingRef.current = true;
+      syncImeCursorAnchor();
+      requestAnimationFrame(syncImeCursorAnchor);
+    };
+    const handleImeEnd = () => {
+      isImeComposingRef.current = false;
+      requestAnimationFrame(() => {
+        if (!unmounted) {
+          syncImeCursorAnchor();
+          scheduleCompletionRefresh();
+        }
+      });
+    };
+    helperTextarea?.addEventListener("focus", handleImeFocus);
+    helperTextarea?.addEventListener("compositionstart", handleImeStart);
+    helperTextarea?.addEventListener("compositionupdate", handleImeUpdate);
+    helperTextarea?.addEventListener("compositionend", handleImeEnd);
 
     // OSC 133: Track exact semantic prompt-end marker (`OSC 133;B`) emitted by built-in Powerline prompt
     const osc133Disp = term.parser.registerOscHandler(133, (data) => {
@@ -741,8 +919,10 @@ export const TerminalPane: React.FC<Props> = ({
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
+          syncImeCursorAnchor();
           sendResize(term.cols, term.rows);
           term.focus();
+          syncImeCursorAnchor();
         } catch {
           // Ignore if unmounted
         }
@@ -833,6 +1013,7 @@ export const TerminalPane: React.FC<Props> = ({
     const ro = new ResizeObserver(() => {
       try {
         fitAddon.fit();
+        syncImeCursorAnchor();
         sendResize(term.cols, term.rows);
       } catch {
         // Ignore transient unmount resize
@@ -842,15 +1023,22 @@ export const TerminalPane: React.FC<Props> = ({
 
     return () => {
       unmounted = true;
+      isImeComposingRef.current = false;
       if (autoReconnectTimerRef.current) {
         window.clearTimeout(autoReconnectTimerRef.current);
       }
       if (compRafRef.current !== null) {
         window.cancelAnimationFrame(compRafRef.current);
       }
+      helperTextarea?.removeEventListener("focus", handleImeFocus);
+      helperTextarea?.removeEventListener("compositionstart", handleImeStart);
+      helperTextarea?.removeEventListener("compositionupdate", handleImeUpdate);
+      helperTextarea?.removeEventListener("compositionend", handleImeEnd);
       ro.disconnect();
       writeParsedDisp.dispose();
       cursorMoveDisp.dispose();
+      renderDisp.dispose();
+      scrollDisp.dispose();
       osc133Disp.dispose();
       selDisp.dispose();
       osc7Disp.dispose();
@@ -883,6 +1071,7 @@ export const TerminalPane: React.FC<Props> = ({
     };
     try {
       fitAddonInstanceRef.current?.fit();
+      syncImeAnchorFnRef.current();
     } catch {
       // Ignore when hidden
     }
@@ -893,6 +1082,32 @@ export const TerminalPane: React.FC<Props> = ({
     terminalCfg?.scrollback,
     themeMode,
   ]);
+
+  // Keep IME cursor anchor synced & restore terminal textarea focus when pane/window regains focus
+  useEffect(() => {
+    if (!focused) return;
+    const ensureTerminalFocusAndImeAnchor = () => {
+      const active = document.activeElement as HTMLElement | null;
+      const isOtherEditable =
+        active &&
+        (active.tagName === "INPUT" ||
+          active.tagName === "SELECT" ||
+          (active.tagName === "TEXTAREA" &&
+            !active.classList.contains("xterm-helper-textarea")) ||
+          active.isContentEditable);
+      if (!isOtherEditable) {
+        termInstanceRef.current?.focus();
+      }
+      requestAnimationFrame(() => {
+        syncImeAnchorFnRef.current();
+      });
+    };
+    ensureTerminalFocusAndImeAnchor();
+    window.addEventListener("focus", ensureTerminalFocusAndImeAnchor);
+    return () => {
+      window.removeEventListener("focus", ensureTerminalFocusAndImeAnchor);
+    };
+  }, [focused]);
 
   useEffect(() => {
     if (terminalCfg?.completion_enabled === false) {

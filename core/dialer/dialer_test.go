@@ -393,3 +393,85 @@ func TestTSNetDialer(t *testing.T) {
 		t.Fatalf("got %q", node.lastAddr)
 	}
 }
+
+func TestParseProxyServerSpecAndBypass(t *testing.T) {
+	cands := parseProxyServerSpec("127.0.0.1:10808")
+	if len(cands) != 2 || cands[0] != "http://127.0.0.1:10808" || cands[1] != "socks5://127.0.0.1:10808" {
+		t.Fatalf("unexpected bare spec candidates: %v", cands)
+	}
+
+	multi := parseProxyServerSpec("http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808")
+	if len(multi) != 2 || multi[0] != "http://127.0.0.1:10809" || multi[1] != "socks5://127.0.0.1:10808" {
+		t.Fatalf("unexpected multi spec candidates: %v", multi)
+	}
+
+	for _, priv := range []string{"127.0.0.1", "192.168.1.50", "10.0.0.8", "100.101.102.103", "localhost", "box.local", "dev.ts.net"} {
+		if !isBypassedPrivateOrLocalHost(priv) {
+			t.Fatalf("expected %q to bypass proxy", priv)
+		}
+	}
+	if isBypassedPrivateOrLocalHost("108.137.19.108") {
+		t.Fatalf("public IP 108.137.19.108 must not bypass proxy")
+	}
+}
+
+func TestSmartDirectDialerSystemProxyFallback(t *testing.T) {
+	realBackend := startEchoServer(t, "SSH-2.0-ViaSystemProxy\r\n")
+
+	proxyLn, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen http proxy: %v", err)
+	}
+	defer proxyLn.Close()
+
+	go func() {
+		for {
+			c, err := proxyLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(clientConn net.Conn) {
+				defer clientConn.Close()
+				br := bufio.NewReader(clientConn)
+				req, err := http.ReadRequest(br)
+				if err != nil || req.Method != http.MethodConnect {
+					return
+				}
+				// Route synthetic unreachable public target 203.0.113.99:22 to local echo server
+				upConn, err := net.Dial("tcp4", realBackend)
+				if err != nil {
+					_, _ = clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+					return
+				}
+				defer upConn.Close()
+				_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+				go func() { _, _ = io.Copy(upConn, clientConn) }()
+				_, _ = io.Copy(clientConn, upConn)
+			}(c)
+		}
+	}()
+
+	t.Setenv("ALL_PROXY", proxyLn.Addr().String())
+	t.Setenv("NO_PROXY", "")
+
+	sd := NewSmartDirectDialer(4*time.Second, 0)
+	sd.StaggerDelay = 60 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	// 203.0.113.0/24 is TEST-NET-3 (public non-private documentation block that drops/fails direct TCP)
+	conn, err := sd.Dial(ctx, "203.0.113.99:22")
+	if err != nil {
+		t.Fatalf("SmartDirectDialer.Dial failed to fallback to system proxy: %v", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, len("SSH-2.0-ViaSystemProxy\r\n"))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read banner via proxy fallback: %v", err)
+	}
+	if string(buf) != "SSH-2.0-ViaSystemProxy\r\n" {
+		t.Fatalf("unexpected banner: %q", string(buf))
+	}
+}

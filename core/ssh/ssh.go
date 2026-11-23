@@ -115,7 +115,7 @@ func (t *Transport) OpenSession(ctx context.Context, cfg transport.SessionConfig
 
 	d := cfg.Dialer
 	if d == nil {
-		d = dialer.NewDirectDialer(defaultHandshakeTimeout, 30*time.Second)
+		d = dialer.NewSmartDirectDialer(defaultHandshakeTimeout, 30*time.Second)
 	}
 
 	rawConn, err := d.Dial(ctx, target)
@@ -579,6 +579,7 @@ func (a *agentFramedStdin) Close() error {
 func (t *Transport) buildAuthMethods(ctx context.Context, cred transport.CredentialsSpec) ([]gossh.AuthMethod, string, error) {
 	pw := cred.Password
 	pemBytes := cred.PrivateKeyPEM
+	passphraseBytes := cred.PrivateKeyPassphrase
 
 	if cred.SecretKeyRef != "" {
 		if t.bridge == nil {
@@ -593,6 +594,14 @@ func (t *Transport) buildAuthMethods(ctx context.Context, cred transport.Credent
 				}
 			} else if strings.Contains(secret, "-----BEGIN ") {
 				pemBytes = []byte(secret)
+				if extraPass, pErr := t.bridge.GetSecret(ctx, cred.SecretKeyRef+":pass"); pErr == nil && extraPass != "" {
+					if len(passphraseBytes) == 0 {
+						passphraseBytes = []byte(extraPass)
+					}
+					if pw == "" {
+						pw = extraPass
+					}
+				}
 			} else if secret != "" {
 				pw = secret
 			}
@@ -606,14 +615,9 @@ func (t *Transport) buildAuthMethods(ctx context.Context, cred transport.Credent
 		}
 	}
 	if len(pemBytes) > 0 {
-		var (
-			signer gossh.Signer
-			err    error
-		)
-		if len(cred.PrivateKeyPassphrase) > 0 {
-			signer, err = gossh.ParsePrivateKeyWithPassphrase(pemBytes, cred.PrivateKeyPassphrase)
-		} else {
-			signer, err = gossh.ParsePrivateKey(pemBytes)
+		signer, err := gossh.ParsePrivateKey(pemBytes)
+		if err != nil && len(passphraseBytes) > 0 {
+			signer, err = gossh.ParsePrivateKeyWithPassphrase(pemBytes, passphraseBytes)
 		}
 		if err != nil {
 			return nil, "", fmt.Errorf("ssh: parse private key: %w", err)
@@ -750,6 +754,7 @@ type Session struct {
 	sftpMu        sync.Mutex
 	sftpClient    *sftp.Client
 	sftpSubSess   io.Closer
+	sftpHomeDir   string
 	fileProtocol  string
 	sftpSudo      bool
 	sudoPassword  string // strictly in-memory only; wiped on Close
@@ -847,6 +852,13 @@ func (s *Session) Close() error {
 			s.unsubNet()
 		}
 		s.closeAllForwards()
+		s.output.Close()
+		_ = s.pipeReader.Close()
+		_ = s.stdin.Close()
+		_ = s.sshSess.Close()
+		if err := s.client.Close(); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
+			closeErr = err
+		}
 		s.sftpMu.Lock()
 		if s.sftpClient != nil {
 			_ = s.sftpClient.Close()
@@ -858,13 +870,6 @@ func (s *Session) Close() error {
 		}
 		s.sudoPassword = ""
 		s.sftpMu.Unlock()
-		s.output.Close()
-		_ = s.pipeReader.Close()
-		_ = s.stdin.Close()
-		_ = s.sshSess.Close()
-		if err := s.client.Close(); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
-			closeErr = err
-		}
 		if s.dialerCloser != nil {
 			_ = s.dialerCloser.Close()
 		}

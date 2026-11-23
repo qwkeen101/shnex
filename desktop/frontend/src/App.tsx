@@ -5,7 +5,6 @@ import {
   ArrowLeftRight,
   Bell,
   Bot,
-  Box,
   CheckSquare,
   ChevronDown,
   ChevronRight,
@@ -94,13 +93,11 @@ import {
   stopSessionForward,
   tailnetDown,
   tailnetUp,
-  toggleFavoriteHost,
   upsertHost,
   upsertSnippet,
   windowAction,
 } from "./api";
 import { AIPane } from "./components/AIPane";
-import { ConnectionHub } from "./components/ConnectionHub";
 import { HostBadge } from "./components/HostBadge";
 import { HostModal } from "./components/HostModal";
 import { MarkdownDocSource, MarkdownTabView } from "./components/MarkdownTabView";
@@ -174,10 +171,13 @@ export const App: React.FC = () => {
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitTab, setSettingsInitTab] = useState<SettingsCategory>("ai");
-  const [mainView, setMainView] = useState<"hub" | "workspace">("hub");
   const [wallpaperRev, setWallpaperRev] = useState<number>(() => Date.now());
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("shnex_sidebar_width"));
+    return Number.isFinite(saved) && saved >= 240 && saved <= 520 ? saved : 300;
+  });
   const [searchBarOpen, setSearchBarOpen] = useState(false);
   const [searchHost, setSearchHost] = useState("");
   const [batchMode, setBatchMode] = useState(false);
@@ -208,10 +208,15 @@ export const App: React.FC = () => {
   const [newTmuxName, setNewTmuxName] = useState("");
   const [remoteCmdHistory, setRemoteCmdHistory] = useState<string[]>([]);
 
-  // In-app Notification Toast Banner
+  // In-app Notification Toast Banner & Native Alert Modal (replaces browser wails.localhost alert)
   const [liveToast, setLiveToast] = useState<{
     title: string;
     body: string;
+  } | null>(null);
+  const [appAlertModal, setAppAlertModal] = useState<{
+    title: string;
+    message: string;
+    isError: boolean;
   } | null>(null);
   const showToast = (title: string, body: string) => {
     setLiveToast({ title, body });
@@ -222,7 +227,6 @@ export const App: React.FC = () => {
   >(null);
   const [hostMenuId, setHostMenuId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const [sidebarTabsCollapsed, setSidebarTabsCollapsed] = useState(false);
   const [showLocalShellMenu, setShowLocalShellMenu] = useState(false);
   const mdFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -286,6 +290,34 @@ export const App: React.FC = () => {
       setLogsLoading(false);
     }
   };
+
+  useEffect(() => {
+    const nativeAlert = window.alert;
+    window.alert = (msg?: unknown) => {
+      const text = String(msg ?? "");
+      const isError = /失败|错误|异常|error|timeout|refused|denied|invalid/i.test(text);
+      setAppAlertModal({
+        title: isError ? "连接与操作异常" : "Shnex 提示",
+        message: text,
+        isError,
+      });
+    };
+    return () => {
+      window.alert = nativeAlert;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!appAlertModal) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" || ev.key === "Enter") {
+        ev.preventDefault();
+        setAppAlertModal(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [appAlertModal]);
 
   useEffect(() => {
     if (openPanels.includes("notifications")) {
@@ -515,7 +547,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, newTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
       recordHistory(hp.name, rawUT, hp.id);
       listHosts().then(setHosts).catch(() => {});
@@ -699,7 +730,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, newTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
     } catch (e) {
       alert(`打开本地终端失败: ${(e as Error).message}`);
@@ -714,7 +744,6 @@ export const App: React.FC = () => {
     );
     if (existing) {
       setActiveTabId(existing.tabId);
-      setMainView("workspace");
       setShowSettings(false);
       return;
     }
@@ -740,7 +769,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, mdTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
     } catch (e) {
       alert(`打开公式排版示例失败: ${(e as Error).message}`);
@@ -764,7 +792,6 @@ export const App: React.FC = () => {
     );
     if (existing) {
       setActiveTabId(existing.tabId);
-      setMainView("workspace");
       setShowSettings(false);
       return;
     }
@@ -790,7 +817,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, mdTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
     } catch (e) {
       alert(`打开本地 Markdown 失败: ${(e as Error).message}`);
@@ -827,7 +853,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, mdTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
     } catch (e) {
       alert(`解析本地 Markdown 失败: ${(e as Error).message}`);
@@ -844,7 +869,6 @@ export const App: React.FC = () => {
     );
     if (existing) {
       setActiveTabId(existing.tabId);
-      setMainView("workspace");
       setShowSettings(false);
       return;
     }
@@ -881,7 +905,6 @@ export const App: React.FC = () => {
       };
       setTabs((prev) => [...prev, mdTab]);
       setActiveTabId(tabId);
-      setMainView("workspace");
       setShowSettings(false);
     } catch (e) {
       alert(`打开远端 Markdown 失败: ${(e as Error).message}`);
@@ -1152,94 +1175,70 @@ export const App: React.FC = () => {
   const wallpaperDimAlpha =
     Math.max(15, Math.min(90, appSettings?.appearance?.wallpaper_dim ?? 52)) /
     100;
-  const glassBlurPx = appSettings?.appearance?.glass_blur_px ?? 16;
 
   return (
-    <div className="relative h-screen w-screen flex flex-col bg-[#14151a] text-[#e5e7eb] text-xs overflow-hidden">
-      {/* Custom / Atmospheric Wallpaper Layer (Visible in Connection Hub) */}
-      {mainView === "hub" && !showSettings && (
-        <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
-          {hasCustomWallpaper ? (
-            <>
-              <div
-                style={{
-                  backgroundImage: `url("${buildWallpaperUrl(wallpaperRev)}")`,
-                }}
-                className="absolute inset-0 bg-cover bg-center scale-[1.01]"
-              />
-              <div
-                style={{
-                  backgroundColor: `rgba(14, 15, 22, ${wallpaperDimAlpha})`,
-                }}
-                className="absolute inset-0"
-              />
-            </>
-          ) : (
-            <div
-              style={{
-                background:
-                  "radial-gradient(circle at 18% 18%, rgba(88, 62, 118, 0.28), transparent 48%), radial-gradient(circle at 82% 14%, rgba(37, 99, 235, 0.20), transparent 46%), linear-gradient(180deg, #171922 0%, #121319 100%)",
-              }}
-              className="absolute inset-0"
-            />
-          )}
-        </div>
-      )}
-
-      {/* ==================== 1. TOP FRAMELESS TITLEBAR & [连接 | 工作区] SWITCHER ==================== */}
-      <header className="relative z-20 h-10 bg-[#1c1d23]/90 backdrop-blur-md border-b border-white/[0.08] flex items-center justify-between shrink-0 wails-drag">
+    <div className="relative h-screen w-screen flex flex-col bg-[#18191c] text-[#e5e7eb] text-xs overflow-hidden">
+      {/* ==================== 1. TOP FRAMELESS TITLEBAR & WORKSPACE TABS ==================== */}
+      <header className="relative z-20 h-10 bg-[#1f2023] border-b border-[#2b2d33] flex items-center justify-between shrink-0 wails-drag">
         <div className="flex items-center h-full min-w-0">
-          {/* App Logo + Title */}
-          <div className="px-3.5 h-full flex items-center gap-2 shrink-0">
-            <span className="w-5 h-5 rounded-md bg-white text-[#1d7dfa] font-extrabold flex items-center justify-center text-[11px] shadow-sm">
-              &gt;_
-            </span>
-            <span className="font-semibold tracking-tight text-[#f3f4f6]">
+          {/* App Logo + Title (Click to return to Welcome view without closing tabs) */}
+          <button
+            onClick={() => {
+              setActiveTabId(null);
+              setShowSettings(false);
+            }}
+            className="px-4 h-full flex items-center gap-2.5 shrink-0 hover:bg-[#272930]/60 transition wails-no-drag"
+            title="回到欢迎首页"
+          >
+            <svg
+              viewBox="0 0 100 100"
+              className="w-6 h-6 shrink-0 drop-shadow-sm"
+              aria-hidden="true"
+            >
+              <defs>
+                <linearGradient id="shnexBgTop" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#1c1e26" />
+                  <stop offset="100%" stopColor="#101116" />
+                </linearGradient>
+              </defs>
+              <rect
+                x="5"
+                y="5"
+                width="90"
+                height="90"
+                rx="22"
+                fill="url(#shnexBgTop)"
+                stroke="#f59e0b"
+                strokeOpacity="0.88"
+                strokeWidth="4.5"
+              />
+              <path
+                d="M26 33 L48 50 L26 67"
+                fill="none"
+                stroke="#fbbf24"
+                strokeWidth="10.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <line
+                x1="54"
+                y1="66"
+                x2="76"
+                y2="66"
+                stroke="#3fb950"
+                strokeWidth="9.8"
+                strokeLinecap="round"
+              />
+            </svg>
+            <span className="text-sm font-semibold tracking-tight text-[#f3f4f6]">
               Shnex
             </span>
-          </div>
+          </button>
 
-          {/* Primary [连接 | 工作区 N] Pill Switcher (Matches Screenshot 12!) */}
-          <div className="p-0.5 rounded-full bg-[#262834]/90 border border-white/[0.10] flex items-center gap-0.5 mx-2 shrink-0 wails-no-drag">
-            <button
-              onClick={() => {
-                setMainView("hub");
-                setShowSettings(false);
-              }}
-              className={`h-7 px-3 rounded-full flex items-center gap-1.5 transition ${
-                mainView === "hub" && !showSettings
-                  ? "bg-[#4a3950] text-white font-semibold shadow-sm"
-                  : "text-[#9ca3b4] hover:text-white"
-              }`}
-            >
-              <Monitor size={12} />
-              <span>连接</span>
-            </button>
-            <button
-              onClick={() => {
-                setMainView("workspace");
-                setShowSettings(false);
-              }}
-              className={`h-7 px-3 rounded-full flex items-center gap-1.5 transition ${
-                mainView === "workspace" && !showSettings
-                  ? "bg-[#2563eb] text-white font-semibold shadow-sm"
-                  : "text-[#9ca3b4] hover:text-white"
-              }`}
-            >
-              <Box size={12} />
-              <span>工作区</span>
-              {tabs.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-white/15 text-[10px] font-mono">
-                  {tabs.length}
-                </span>
-              )}
-            </button>
-          </div>
-
-          {/* Workspace Tabs (Shown inline when in Workspace view) */}
+          {/* Workspace Tabs */}
           <div
             className={
-              mainView === "workspace" && !showSettings
+              !showSettings
                 ? "flex items-center gap-1 px-1.5 h-full overflow-x-auto wails-no-drag"
                 : "hidden"
             }
@@ -1255,7 +1254,6 @@ export const App: React.FC = () => {
                   key={tab.tabId}
                   onClick={() => {
                     setActiveTabId(tab.tabId);
-                    setMainView("workspace");
                     setShowSettings(false);
                   }}
                   className={`h-7 px-3 rounded-md flex items-center gap-2 cursor-pointer border transition-colors ${
@@ -1511,74 +1509,18 @@ export const App: React.FC = () => {
         />
       )}
 
-      {!showSettings && mainView === "hub" && (
-        <div className="relative z-10 flex-1 flex min-h-0">
-          <ConnectionHub
-            hosts={hosts}
-            activeSessions={tabs
-              .filter((t) => t.protocol !== "local" && t.protocol !== "markdown")
-              .map((t) => ({
-                tabId: t.tabId,
-                hostId: t.hostId,
-                title: t.title,
-                maskedUserTarget: maskTargetAddress(
-                  t.rawUserTarget,
-                  privacyMode
-                ),
-                currentDir: t.sftpPath || "/",
-                icon: t.icon,
-                badgeText: t.badgeText,
-                color: t.color,
-                stats: t.latestStats,
-                cpuHistory: t.cpuHistory || [],
-                aiState: t.aiState,
-              }))}
-            totalSessionsCount={totalConnections}
-            latencies={hostLatencies}
-            privacyMode={privacyMode}
-            blurPx={glassBlurPx}
-            connectingId={connectingId}
-            onConnectHost={(hp, openSftp) => openHostWorkspace(hp, openSftp)}
-            onResumeTab={(tabId) => {
-              setActiveTabId(tabId);
-              setMainView("workspace");
-            }}
-            onOpenTabSFTP={(tabId) => {
-              setActiveTabId(tabId);
-              setMainView("workspace");
-              setOpenPanels(["sftp"]);
-            }}
-            onDisconnectTab={(tabId) => {
-              const target = tabs.find((x) => x.tabId === tabId);
-              if (target) closeWholeTab(target);
-            }}
-            onNewHost={() => setHostModalTarget("new")}
-            onEditHost={(hp) => setHostModalTarget(hp)}
-            onToggleFavorite={async (hp) => {
-              await toggleFavoriteHost(hp.id);
-              setHosts(await listHosts());
-            }}
-            onQuickConnect={() => setShowQuickConnect(true)}
-            onQuickMigrate={() => setShowQuickMigrate(true)}
-            onPingAll={handlePingHostsClick}
-            onOpenLocalTerminal={() => openLocalTerminal()}
-            onOpenLocalMarkdown={triggerLocalMarkdownPicker}
-            onOpenMarkdownDemo={openSampleMarkdownTab}
-          />
-        </div>
-      )}
-
       <div
         className={
-          showSettings || mainView !== "workspace"
-            ? "hidden"
-            : "relative z-10 flex-1 flex min-h-0"
+          showSettings ? "hidden" : "relative z-10 flex-1 flex min-h-0"
         }
       >
-        {/* 2A. Left Host Sidebar (Matches Screenshot 5 Toolbar + Empty State!) */}
+        {/* 2A. Left Host Sidebar (Resizable + Spacious Host Cards!) */}
         {sidebarOpen && (
-          <aside className="w-[224px] bg-[#1f2023] border-r border-[#2b2d33] flex flex-col justify-between shrink-0">
-            <div className="p-2.5 space-y-2.5 overflow-y-auto flex-1">
+          <aside
+            style={{ width: sidebarWidth }}
+            className="relative bg-[#1f2023] border-r border-[#2b2d33] flex flex-col justify-between shrink-0 select-none"
+          >
+            <div className="p-3 space-y-3 overflow-y-auto flex-1">
               {/* Compact Action Icon Row: [☑] [🔍] ... [⏲] [⤢] [+] */}
               <div className="flex items-center justify-between px-0.5 text-[#8b909a]">
                 <div className="flex items-center gap-1">
@@ -1587,49 +1529,49 @@ export const App: React.FC = () => {
                       setBatchMode((v) => !v);
                       setSelectedHostIds([]);
                     }}
-                    className={`p-1 rounded hover:bg-[#2b2d34] ${
+                    className={`p-1.5 rounded-lg hover:bg-[#2b2d34] ${
                       batchMode ? "text-[#3b82f6]" : "hover:text-white"
                     }`}
                     title="批量管理主机"
                   >
-                    <CheckSquare size={14} />
+                    <CheckSquare size={16} />
                   </button>
                   <button
                     onClick={() => setSearchBarOpen((v) => !v)}
-                    className={`p-1 rounded hover:bg-[#2b2d34] ${
+                    className={`p-1.5 rounded-lg hover:bg-[#2b2d34] ${
                       searchBarOpen ? "text-white bg-[#2b2d34]" : "hover:text-white"
                     }`}
                     title="搜索主机"
                   >
-                    <Search size={14} />
+                    <Search size={16} />
                   </button>
                 </div>
 
                 <div className="flex items-center gap-1">
                   <button
                     onClick={handlePingHostsClick}
-                    className={`p-1 rounded hover:bg-[#2b2d34] ${
+                    className={`p-1.5 rounded-lg hover:bg-[#2b2d34] ${
                       pingingAll
                         ? "text-[#3fb950] animate-pulse"
                         : "hover:text-white"
                     }`}
                     title="测试全部主机连接延迟"
                   >
-                    <Gauge size={14} />
+                    <Gauge size={16} />
                   </button>
                   <button
                     onClick={() => setSearchHost("")}
-                    className="p-1 rounded hover:bg-[#2b2d34] hover:text-white"
+                    className="p-1.5 rounded-lg hover:bg-[#2b2d34] hover:text-white"
                     title="展开全部"
                   >
-                    <ChevronsUpDown size={14} />
+                    <ChevronsUpDown size={16} />
                   </button>
                   <button
                     onClick={() => setHostModalTarget("new")}
-                    className="p-1 rounded hover:bg-[#2b2d34] text-[#d1d5db] hover:text-white"
+                    className="p-1.5 rounded-lg hover:bg-[#2b2d34] text-[#d1d5db] hover:text-white"
                     title="新建主机"
                   >
-                    <Plus size={15} />
+                    <Plus size={17} />
                   </button>
                 </div>
               </div>
@@ -1672,81 +1614,6 @@ export const App: React.FC = () => {
                 </div>
               )}
 
-              {/* Active Workspace TABS Section in Sidebar (Matches Screenshot 1 `TABS` + `M↓ math-rendering.md`!) */}
-              {tabs.length > 0 && (
-                <div className="space-y-1 pb-2 border-b border-[#2b2d33]">
-                  <div className="px-1 flex items-center justify-between text-[11px] font-semibold tracking-wider text-[#7c828e]">
-                    <button
-                      onClick={() => setSidebarTabsCollapsed((v) => !v)}
-                      className="flex items-center gap-1 hover:text-white"
-                    >
-                      {sidebarTabsCollapsed ? (
-                        <ChevronRight size={12} />
-                      ) : (
-                        <ChevronDown size={12} />
-                      )}
-                      <span>标签页</span>
-                    </button>
-                    <button
-                      onClick={openSampleMarkdownTab}
-                      className="px-1.5 py-0.5 rounded hover:bg-[#2a2d36] text-[#93c5fd] font-mono font-bold text-[10px]"
-                      title="打开原生数学公式排版示例文档"
-                    >
-                      M↓ 示例
-                    </button>
-                  </div>
-                  {!sidebarTabsCollapsed && (
-                    <div className="space-y-1">
-                      {tabs.map((stTab) => {
-                        const isSel = stTab.tabId === activeTabId;
-                        const isMd = stTab.protocol === "markdown";
-                        return (
-                          <div
-                            key={stTab.tabId}
-                            onClick={() => {
-                              setActiveTabId(stTab.tabId);
-                              setShowSettings(false);
-                            }}
-                            className={`px-2.5 py-1.5 rounded-lg flex items-center justify-between gap-2 cursor-pointer transition-colors group ${
-                              isSel
-                                ? "bg-[#2c2f37] text-white shadow-sm"
-                                : "text-[#cbd5e1] hover:bg-[#26282f]"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              {isMd ? (
-                                <span className="px-1 py-0.5 rounded bg-[#f3f4f6] text-[#111827] font-mono font-extrabold text-[9.5px] leading-none shrink-0">
-                                  M↓
-                                </span>
-                              ) : (
-                                <HostBadge
-                                  icon={stTab.icon}
-                                  badgeText={stTab.badgeText}
-                                  color={stTab.color}
-                                  size="xs"
-                                />
-                              )}
-                              <span className="truncate font-mono text-xs">
-                                {stTab.title}
-                              </span>
-                            </div>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                closeWholeTab(stTab);
-                              }}
-                              className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[#383c48] text-[#8b909a] hover:text-white shrink-0"
-                            >
-                              <X size={11} />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
               {/* Empty State vs Saved Hosts List */}
               {hosts.length === 0 ? (
                 <div className="px-1.5 pt-3 space-y-1.5">
@@ -1771,27 +1638,24 @@ export const App: React.FC = () => {
 
                     return (
                       <div key={grpName || "__ungrouped"} className="space-y-1">
-                        <div
-                          onClick={() => {
-                            if (grpName) {
+                        {grpName && (
+                          <div
+                            onClick={() => {
                               setCollapsedGroups((p) => ({
                                 ...p,
                                 [grpName]: !p[grpName],
                               }));
-                            }
-                          }}
-                          className={`px-1 text-[11px] font-medium text-[#7c828e] flex items-center gap-1 ${
-                            grpName ? "cursor-pointer hover:text-white" : ""
-                          }`}
-                        >
-                          {grpName &&
-                            (isCollapsed ? (
+                            }}
+                            className="px-1 text-[11px] font-medium text-[#7c828e] flex items-center gap-1 cursor-pointer hover:text-white"
+                          >
+                            {isCollapsed ? (
                               <ChevronRight size={12} />
                             ) : (
                               <ChevronDown size={12} />
-                            ))}
-                          <span>{grpName || "主机"}</span>
-                        </div>
+                            )}
+                            <span>{grpName}</span>
+                          </div>
+                        )}
 
                         {!isCollapsed &&
                           groupItems.map((hp) => {
@@ -1803,6 +1667,7 @@ export const App: React.FC = () => {
                               (t) => t.aiState === "approval"
                             );
                             const isSelected = activeTab?.hostId === hp.id;
+                            const isConnecting = connectingId === hp.id;
                             const lat = hostLatencies[hp.id];
 
                             return (
@@ -1823,13 +1688,15 @@ export const App: React.FC = () => {
                                       openHostWorkspace(hp);
                                     }
                                   }}
-                                  className={`px-2.5 py-2 rounded-lg flex items-center justify-between cursor-pointer transition-colors ${
-                                    isSelected
-                                      ? "bg-[#2c2f37] text-white"
+                                  className={`relative overflow-hidden px-3 py-2.5 rounded-xl flex items-center justify-between gap-2 cursor-pointer transition-all ${
+                                    isConnecting
+                                      ? "bg-[#252a36] text-white ring-1 ring-[#3b82f6]/45 shadow-sm"
+                                      : isSelected
+                                      ? "bg-[#2c2f37] text-white shadow-sm"
                                       : "hover:bg-[#26282f] text-[#d1d5db]"
                                   }`}
                                 >
-                                  <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="flex items-center gap-3 min-w-0 flex-1">
                                     {batchMode && (
                                       <input
                                         type="checkbox"
@@ -1844,11 +1711,14 @@ export const App: React.FC = () => {
                                         icon={hp.icon}
                                         badgeText={hp.badge_text}
                                         color={hp.color}
-                                        size="sm"
+                                        size="md"
                                       />
-                                      {isConnected && (
+                                      {isConnecting && (
+                                        <span className="pointer-events-none absolute -inset-1 rounded-[14px] border-2 border-[#60a5fa]/30 border-t-[#60a5fa] animate-spin" />
+                                      )}
+                                      {!isConnecting && isConnected && (
                                         <span
-                                          className={`absolute -top-0.5 -left-0.5 w-2 h-2 rounded-full border border-[#1f2023] ${
+                                          className={`absolute -top-0.5 -left-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#1f2023] ${
                                             needsApproval
                                               ? "bg-[#f59e0b]"
                                               : "bg-[#3fb950]"
@@ -1856,16 +1726,52 @@ export const App: React.FC = () => {
                                         />
                                       )}
                                     </div>
-                                    <div className="min-w-0">
-                                      <div className="truncate font-medium">
-                                        {hp.name}
-                                        {connectingId === hp.id && (
-                                          <span className="ml-1 text-[10px] text-[#60a5fa]">
-                                            连接中...
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span className="text-sm font-semibold text-[#f3f4f6] leading-snug truncate">
+                                          {hp.name}
+                                        </span>
+                                        {isConnecting && (
+                                          <span
+                                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#3b82f6]/15 shrink-0"
+                                            aria-label="正在连接"
+                                          >
+                                            <svg
+                                              className="w-3 h-3 text-[#60a5fa] animate-spin"
+                                              viewBox="0 0 24 24"
+                                              fill="none"
+                                            >
+                                              <circle
+                                                cx="12"
+                                                cy="12"
+                                                r="9"
+                                                stroke="currentColor"
+                                                strokeOpacity="0.25"
+                                                strokeWidth="3"
+                                              />
+                                              <path
+                                                d="M21 12a9 9 0 0 0-9-9"
+                                                stroke="currentColor"
+                                                strokeWidth="3"
+                                                strokeLinecap="round"
+                                              />
+                                            </svg>
+                                            <span
+                                              style={{ animationDelay: "0ms" }}
+                                              className="w-1 h-1 rounded-full bg-[#60a5fa] shnex-wave-dot"
+                                            />
+                                            <span
+                                              style={{ animationDelay: "150ms" }}
+                                              className="w-1 h-1 rounded-full bg-[#60a5fa] shnex-wave-dot"
+                                            />
+                                            <span
+                                              style={{ animationDelay: "300ms" }}
+                                              className="w-1 h-1 rounded-full bg-[#60a5fa] shnex-wave-dot"
+                                            />
                                           </span>
                                         )}
                                       </div>
-                                      <div className="text-[10px] text-[#7c828e] font-mono truncate">
+                                      <div className="text-xs text-[#9198a6] font-mono mt-0.5 truncate">
                                         {maskTargetAddress(
                                           `${hp.user}@${hp.host}`,
                                           privacyMode
@@ -1887,7 +1793,11 @@ export const App: React.FC = () => {
 
                                   <div
                                     onClick={(e) => e.stopPropagation()}
-                                    className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-[#9ca3af]"
+                                    className={`${
+                                      hostMenuId === hp.id
+                                        ? "flex"
+                                        : "hidden group-hover:flex"
+                                    } items-center gap-0.5 shrink-0 text-[#9ca3af]`}
                                   >
                                     <button
                                       onClick={() => {
@@ -1900,10 +1810,10 @@ export const App: React.FC = () => {
                                           openHostWorkspace(hp, true);
                                         }
                                       }}
-                                      className="p-1 rounded hover:bg-[#353945] hover:text-white"
+                                      className="p-1.5 rounded-lg hover:bg-[#353945] hover:text-white"
                                       title="打开 SFTP"
                                     >
-                                      <FolderOpen size={12} />
+                                      <FolderOpen size={14} />
                                     </button>
                                     <button
                                       onClick={() =>
@@ -1911,12 +1821,18 @@ export const App: React.FC = () => {
                                           cur === hp.id ? null : hp.id
                                         )
                                       }
-                                      className="p-1 rounded hover:bg-[#353945] hover:text-white"
+                                      className="p-1.5 rounded-lg hover:bg-[#353945] hover:text-white"
                                       title="更多"
                                     >
-                                      <MoreHorizontal size={13} />
+                                      <MoreHorizontal size={15} />
                                     </button>
                                   </div>
+
+                                  {isConnecting && (
+                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-[#3b82f6]/15 overflow-hidden">
+                                      <div className="w-2/5 h-full bg-gradient-to-r from-transparent via-[#60a5fa] to-transparent shnex-shimmer-bar" />
+                                    </div>
+                                  )}
                                 </div>
 
                                 {hostMenuId === hp.id && (
@@ -1980,59 +1896,168 @@ export const App: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* Drag-to-Resize Handle on Right Edge of Host Sidebar */}
+            <div
+              onDoubleClick={() => {
+                setSidebarWidth(300);
+                localStorage.setItem("shnex_sidebar_width", "300");
+              }}
+              onMouseDown={(ev) => {
+                ev.preventDefault();
+                const startX = ev.clientX;
+                const startW = sidebarWidth;
+                const onMove = (me: MouseEvent) => {
+                  const next = Math.max(
+                    240,
+                    Math.min(520, startW + (me.clientX - startX))
+                  );
+                  setSidebarWidth(next);
+                  localStorage.setItem("shnex_sidebar_width", String(next));
+                };
+                const onUp = () => {
+                  window.removeEventListener("mousemove", onMove);
+                  window.removeEventListener("mouseup", onUp);
+                };
+                window.addEventListener("mousemove", onMove);
+                window.addEventListener("mouseup", onUp);
+              }}
+              title="拖拽调节侧栏宽度（双击恢复默认）"
+              className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-[#3b82f6]/45 active:bg-[#3b82f6] transition-colors z-20"
+            />
           </aside>
         )}
 
         {/* 2B. Center Stage (Dot-Matrix Welcome Screen OR Active Split Panes!) */}
-        <main className="flex-1 flex min-w-0 min-h-0 bg-[#141518]">
+        <main className="flex-1 flex min-w-0 min-h-0 bg-[#18191c]">
           {!activeTab ? (
-            <div className="flex-1 shnex-dot-grid flex flex-col items-center justify-center p-8 text-center">
-              <div className="w-14 h-14 rounded-2xl bg-white shadow-xl flex items-center justify-center mb-4">
-                <span className="text-xl font-black tracking-tighter text-[#1d7dfa]">
-                  &gt;_
-                </span>
-              </div>
+            <div className="relative flex-1 shnex-dot-grid flex flex-col items-center justify-center p-8 text-center select-none overflow-hidden">
+              {hasCustomWallpaper && (
+                <>
+                  <div
+                    style={{
+                      backgroundImage: `url("${buildWallpaperUrl(wallpaperRev)}")`,
+                    }}
+                    className="pointer-events-none absolute inset-0 bg-cover bg-center scale-[1.01]"
+                  />
+                  <div
+                    style={{
+                      backgroundColor: `rgba(20, 21, 24, ${wallpaperDimAlpha})`,
+                    }}
+                    className="pointer-events-none absolute inset-0"
+                  />
+                </>
+              )}
 
-              <h1 className="text-lg font-semibold text-white mb-1.5">
-                欢迎使用 Shnex
-              </h1>
-              <p className="text-[#8b909a] mb-6">
-                在左侧选择一台主机以打开会话。
-              </p>
+              {(() => {
+                const connectingHost = connectingId
+                  ? hosts.find((h) => h.id === connectingId)
+                  : null;
+                if (connectingHost) {
+                  return (
+                    <div className="relative z-10 flex flex-col items-center">
+                      <div className="relative mb-5 flex items-center justify-center">
+                        <span className="pointer-events-none absolute -inset-3 rounded-[22px] border border-[#60a5fa]/25 animate-ping" />
+                        <span className="pointer-events-none absolute -inset-2 rounded-[20px] border-2 border-[#60a5fa]/20 border-t-[#60a5fa] animate-spin" />
+                        <HostBadge
+                          icon={connectingHost.icon}
+                          badgeText={connectingHost.badge_text}
+                          color={connectingHost.color}
+                          size="lg"
+                        />
+                      </div>
+                      <div className="text-base font-semibold text-white mb-1.5">
+                        {connectingHost.name}
+                      </div>
+                      <div className="text-xs font-mono text-[#9198a6] mb-4">
+                        {maskTargetAddress(
+                          `${connectingHost.user}@${connectingHost.host}`,
+                          privacyMode
+                        )}
+                      </div>
+                      <div className="w-40 h-1 rounded-full bg-[#2b2e38] overflow-hidden">
+                        <div className="w-2/5 h-full rounded-full bg-gradient-to-r from-transparent via-[#60a5fa] to-transparent shnex-shimmer-bar" />
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="relative z-10 flex flex-col items-center">
+                <svg
+                  viewBox="0 0 100 100"
+                  className="w-16 h-16 drop-shadow-2xl mb-4"
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <linearGradient id="shnexBgHero" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#1c1e26" />
+                      <stop offset="100%" stopColor="#101116" />
+                    </linearGradient>
+                  </defs>
+                  <rect
+                    x="5"
+                    y="5"
+                    width="90"
+                    height="90"
+                    rx="22"
+                    fill="url(#shnexBgHero)"
+                    stroke="#f59e0b"
+                    strokeOpacity="0.88"
+                    strokeWidth="3.2"
+                  />
+                  <path
+                    d="M26 33 L48 50 L26 67"
+                    fill="none"
+                    stroke="#fbbf24"
+                    strokeWidth="10.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <line
+                    x1="54"
+                    y1="66"
+                    x2="76"
+                    y2="66"
+                    stroke="#3fb950"
+                    strokeWidth="9.6"
+                    strokeLinecap="round"
+                  />
+                </svg>
 
-              {/* 3 Pill Action Buttons (Exact Match to Screenshot 5!) */}
-              <div className="flex items-center gap-2.5">
-                <button
-                  onClick={() => {
-                    setMigrateMsg(null);
-                    setShowQuickMigrate(true);
-                  }}
-                  className="px-4 py-1.5 rounded-full bg-[#1d7dfa] hover:bg-[#358bfa] text-white font-medium transition shadow-sm"
-                >
-                  快速迁移
-                </button>
-                <button
-                  onClick={() => setShowQuickConnect(true)}
-                  className="px-4 py-1.5 rounded-full bg-[#2b2d32] hover:bg-[#353840] border border-[#383b44] text-[#e5e7eb] font-medium transition"
-                >
-                  快速连接
-                </button>
-                <button
-                  onClick={() => setHostModalTarget("new")}
-                  className="px-4 py-1.5 rounded-full bg-[#2b2d32] hover:bg-[#353840] border border-[#383b44] text-[#e5e7eb] font-medium transition"
-                >
-                  新建主机
-                </button>
-                <button
-                  onClick={openSampleMarkdownTab}
-                  className="px-4 py-1.5 rounded-full bg-[#2b2d32] hover:bg-[#353840] border border-[#383b44] text-[#93c5fd] font-medium transition flex items-center gap-1.5"
-                >
-                  <span className="font-mono font-bold text-[10px] px-1 py-0.5 rounded bg-[#93c5fd]/15">
-                    M↓
-                  </span>
-                  <span>公式文档演示</span>
-                </button>
+                <h1 className="text-xl font-bold text-white tracking-tight mb-2">
+                  欢迎使用 Shnex
+                </h1>
+                <p className="text-sm text-[#9198a6] mb-7">
+                  在左侧选择一台主机以打开会话。
+                </p>
+
+                {/* 3 Pill Action Buttons */}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      setMigrateMsg(null);
+                      setShowQuickMigrate(true);
+                    }}
+                    className="px-5 py-2 rounded-full bg-[#1d7dfa] hover:bg-[#358bfa] text-sm text-white font-medium transition shadow-sm"
+                  >
+                    快速迁移
+                  </button>
+                  <button
+                    onClick={() => setShowQuickConnect(true)}
+                    className="px-5 py-2 rounded-full bg-[#2b2d32] hover:bg-[#353840] border border-[#363940] text-sm text-[#e5e7eb] font-medium transition"
+                  >
+                    快速连接
+                  </button>
+                  <button
+                    onClick={() => setHostModalTarget("new")}
+                    className="px-5 py-2 rounded-full bg-[#2b2d32] hover:bg-[#353840] border border-[#363940] text-sm text-[#e5e7eb] font-medium transition"
+                  >
+                    新建主机
+                  </button>
+                </div>
               </div>
+                );
+              })()}
             </div>
           ) : (
             <div className="flex-1 flex p-1.5 gap-1.5 min-w-0 min-h-0">
@@ -2999,11 +3024,14 @@ export const App: React.FC = () => {
         </div>
       </div>
 
-      {/* ==================== 3. BOTTOM GLOBAL FOOTER BAR (Matches Screenshot 5!) ==================== */}
-      <footer className="h-6 bg-[#1b1c1f] border-t border-[#2b2d33] flex items-center justify-between text-[11px] text-[#8b909a] shrink-0">
+      {/* ==================== 3. BOTTOM GLOBAL FOOTER BAR ==================== */}
+      <footer className="h-7 bg-[#1b1c1f] border-t border-[#2b2d33] flex items-center justify-between text-xs text-[#8b909a] shrink-0">
         {/* Left Sidebar Status Cell */}
         <div className="flex items-center h-full min-w-0">
-          <div className="w-[224px] h-full px-3 border-r border-[#2b2d33] flex items-center justify-between shrink-0">
+          <div
+            style={{ width: sidebarOpen ? sidebarWidth : 220 }}
+            className="h-full px-3.5 border-r border-[#2b2d33] flex items-center justify-between shrink-0"
+          >
             <span>{hosts.length} 台主机</span>
             <div className="flex items-center gap-2">
               <span className="flex items-center gap-1">
@@ -3072,13 +3100,13 @@ export const App: React.FC = () => {
           <div className="relative group">
             <button
               onClick={() => setPrivacyMode((v) => !v)}
-              className={`w-5 h-5 rounded-full flex items-center justify-center transition ${
+              className={`w-5 h-5 rounded flex items-center justify-center transition ${
                 privacyMode
-                  ? "bg-[#1d7dfa] text-white"
-                  : "hover:bg-[#2b2d34] hover:text-white"
+                  ? "text-[#8b909a] hover:bg-[#2b2d34] hover:text-white"
+                  : "text-[#60a5fa] hover:bg-[#2b2d34]"
               }`}
             >
-              {privacyMode ? <EyeOff size={11} /> : <Eye size={11} />}
+              {privacyMode ? <EyeOff size={12} /> : <Eye size={12} />}
             </button>
             <div className="pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-7 right-0 whitespace-nowrap px-2.5 py-1 rounded-md bg-white text-[#121316] font-medium shadow-lg text-xs z-50">
               隐私模式：{privacyMode ? "隐藏 IP 地址" : "已显示完整 IP"}
@@ -3424,6 +3452,58 @@ export const App: React.FC = () => {
                   {tsBusy ? "启动中..." : "启动连接"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {appAlertModal && (
+        <div
+          className="fixed inset-0 z-[120] bg-black/65 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setAppAlertModal(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl bg-[#1b1d24] border border-[#2f3340] shadow-2xl p-5 text-[13px] space-y-3.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-semibold text-white text-[14px]">
+                <span
+                  className={`inline-block w-2 h-2 rounded-full ${
+                    appAlertModal.isError ? "bg-[#ef4444]" : "bg-[#3b82f6]"
+                  }`}
+                />
+                <span>{appAlertModal.title}</span>
+              </div>
+              <button
+                onClick={() => setAppAlertModal(null)}
+                className="p-1 rounded-md hover:bg-[#2a2d36] text-[#8b909a] hover:text-white transition"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-lg bg-[#13151a] border border-[#282b36] text-[#e5e7eb] font-mono text-[12px] leading-relaxed break-words select-text max-h-52 overflow-y-auto">
+              {appAlertModal.message}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(appAlertModal.message).catch(() => {});
+                  showToast("已复制", "提示内容已复制到剪贴板");
+                }}
+                className="px-3 py-1.5 rounded-lg bg-[#252833] hover:bg-[#2e3240] text-[#d1d5db] text-[12px] transition"
+              >
+                复制内容
+              </button>
+              <button
+                autoFocus
+                onClick={() => setAppAlertModal(null)}
+                className="px-4 py-1.5 rounded-lg bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-medium text-[12px] transition"
+              >
+                确定
+              </button>
             </div>
           </div>
         </div>

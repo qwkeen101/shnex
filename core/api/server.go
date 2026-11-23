@@ -647,7 +647,9 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if sess.Protocol() == localpty.ProtocolName {
 		compInsp = completion.NewLocalInspector(req.DefaultDir)
 	} else {
-		compInsp = completion.NewRemoteSSHInspector(req.DefaultDir, sess)
+		remoteInsp := completion.NewRemoteSSHInspector(req.DefaultDir, sess)
+		go remoteInsp.Prewarm()
+		compInsp = remoteInsp
 	}
 
 	notifyApproval := req.NotifyOnApproval || req.NotifyOnIdle
@@ -688,17 +690,30 @@ func (s *Server) buildSessionRoute(
 		return plan.Dialer, nil, plan.TargetAddr, &plan.Credentials, nil
 	}
 
-	var base dialer.Dialer = dialer.NewDirectDialer(15*time.Second, 30*time.Second)
+	proxySpec := strings.TrimSpace(req.Route.ProxyURL)
+	var base dialer.Dialer
 	if req.Route.UseTSNet {
 		tsd, err := s.tailnetMgr.Dialer()
 		if err != nil {
 			return nil, nil, "", nil, err
 		}
 		base = tsd
+	} else if strings.EqualFold(proxySpec, "direct") {
+		base = dialer.NewDirectDialer(15*time.Second, 30*time.Second)
+		proxySpec = ""
+	} else if strings.EqualFold(proxySpec, "system") {
+		sd := dialer.NewSmartDirectDialer(15*time.Second, 30*time.Second)
+		sd.StaggerDelay = 1 * time.Millisecond
+		base = sd
+		proxySpec = ""
+	} else if proxySpec == "" {
+		base = dialer.NewSmartDirectDialer(15*time.Second, 30*time.Second)
+	} else {
+		base = dialer.NewDirectDialer(15*time.Second, 30*time.Second)
 	}
 
-	if strings.TrimSpace(req.Route.ProxyURL) != "" {
-		pd, err := dialer.NewProxyDialerFromURL(req.Route.ProxyURL, base)
+	if proxySpec != "" {
+		pd, err := dialer.NewProxyDialerFromURL(proxySpec, base)
 		if err != nil {
 			return nil, nil, "", nil, err
 		}

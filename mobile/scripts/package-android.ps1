@@ -1,5 +1,6 @@
 param(
-  [string]$Version = "0.3.3"
+  [string]$Version = "0.3.3",
+  [switch]$SkipCoreBind
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,25 +22,25 @@ New-Item -ItemType Directory -Force -Path $libsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 Remove-Item (Join-Path $androidDir ".gitkeep") -Force -ErrorAction SilentlyContinue
 
-Write-Host "==> [1/3] Binding pure-Go Shnex core engine into Android JNI AAR (arm64-v8a)..."
-Push-Location $coreDir
-$env:GOWORK = "off"
-go get golang.org/x/mobile/bind@latest
-if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 $aarOut = Join-Path $libsDir "shnexcore.aar"
-gomobile bind -target=android/arm64 -androidapi 26 -ldflags="-s -w" -o $aarOut ./mobilebridge
-if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
-go mod tidy
-Remove-Item Env:\GOWORK -ErrorAction SilentlyContinue
-Pop-Location
-
-Write-Host "==> [2/3] Generating Gradle Wrapper & compiling Jetpack Compose Material 3 APK..."
-Push-Location $androidDir
-if (-not (Test-Path (Join-Path $androidDir "gradlew.bat"))) {
-  & gradle wrapper --gradle-version 8.11.1
+if (-not $SkipCoreBind -or -not (Test-Path $aarOut)) {
+  Write-Host "==> [1/3] Binding pure-Go Shnex core engine into Android JNI AAR (arm64-v8a)..."
+  Push-Location $coreDir
+  $env:GOWORK = "off"
+  go get golang.org/x/mobile/bind@v0.0.0-20261117202452-47699113848a
   if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+  gomobile bind -target=android/arm64 -androidapi 26 -ldflags="-s -w" -o $aarOut ./mobilebridge
+  if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+  go mod tidy
+  Remove-Item Env:\GOWORK -ErrorAction SilentlyContinue
+  Pop-Location
+} else {
+  Write-Host "==> [1/3] Reusing existing $aarOut..."
 }
-& .\gradlew.bat assembleRelease --no-daemon
+
+Write-Host "==> [2/3] Compiling Jetpack Compose Material 3 APK with Gradle 8.11.1..."
+Push-Location $androidDir
+& gradle assembleRelease
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 Pop-Location
 

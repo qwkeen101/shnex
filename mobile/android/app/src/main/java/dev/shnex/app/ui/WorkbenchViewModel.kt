@@ -194,12 +194,28 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         privateKeyPem: String,
         tmuxSession: String,
         useTsnet: Boolean,
-        postLoginScript: String
+        postLoginScript: String,
+        onResult: (Result<HostItem>) -> Unit = {}
     ) {
-        val client = apiClient ?: return
         viewModelScope.launch {
-            runCatching {
-                client.upsertHost(
+            var client = apiClient
+            if (client == null) {
+                ShnexRelayService.ensureStarted(getApplication())
+                repeat(20) {
+                    delay(120)
+                    client = apiClient
+                    if (client != null) return@repeat
+                }
+            }
+            val readyClient = client
+            if (readyClient == null) {
+                val err = IllegalStateException("本地安全核心尚未就绪，请稍候再试")
+                showToast(err.message ?: "核心未就绪")
+                onResult(Result.failure(err))
+                return@launch
+            }
+            val result = runCatching {
+                readyClient.upsertHost(
                     id = id,
                     name = name,
                     host = host,
@@ -211,12 +227,14 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
                     useTsnet = useTsnet,
                     postLoginScript = postLoginScript
                 )
-            }.onSuccess {
+            }
+            result.onSuccess {
                 reloadHosts()
                 showToast("主机「$name」已加密保存")
             }.onFailure { e ->
                 showToast("保存失败: ${e.message}")
             }
+            onResult(result)
         }
     }
 

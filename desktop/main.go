@@ -15,6 +15,7 @@ import (
 	"github.com/shnex/shnex/core/api"
 	"github.com/shnex/shnex/core/platform"
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
 //go:embed all:frontend/dist
@@ -197,6 +198,17 @@ func main() {
 		URL:              "/",
 	})
 	winPtr.Store(mainWindow)
+
+	// Restore Win32 keyboard & IME focus back to the WebView2 child surface
+	// after frameless window move/resize/restore (Wails v3 temporarily calls
+	// SetFocus(w.hwnd) on WM_ENTERSIZEMOVE, which otherwise leaves focus on
+	// DefWindowProc and causes Windows IME to pop up at screen (0, 0)).
+	restoreWebViewFocus := func(_ *application.WindowEvent) {
+		mainWindow.Focus()
+	}
+	mainWindow.OnWindowEvent(events.Windows.WindowEndMove, restoreWebViewFocus)
+	mainWindow.OnWindowEvent(events.Windows.WindowEndResize, restoreWebViewFocus)
+	mainWindow.OnWindowEvent(events.Windows.WindowRestore, restoreWebViewFocus)
 
 	// System Tray Integration ("隐藏到系统托盘后，会话和后台服务继续运行")
 	sysTray := app.SystemTray.New()

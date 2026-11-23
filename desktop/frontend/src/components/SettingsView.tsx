@@ -2476,8 +2476,44 @@ export const SettingsView: React.FC<Props> = ({
               <div className="space-y-4">
                 <h1 className="text-lg font-semibold text-white">关于 Shnex</h1>
                 <div className="rounded-xl bg-[#202126] border border-[#2d3039] p-5 space-y-2.5 leading-relaxed">
-                  <div className="text-base font-semibold text-white">
-                    Shnex Workbench v0.3.3
+                  <div className="flex items-center gap-3">
+                    <svg
+                      viewBox="0 0 100 100"
+                      className="w-9 h-9 shrink-0 drop-shadow"
+                      aria-hidden="true"
+                    >
+                      <rect
+                        x="5"
+                        y="5"
+                        width="90"
+                        height="90"
+                        rx="22"
+                        fill="#16181f"
+                        stroke="#f59e0b"
+                        strokeOpacity="0.88"
+                        strokeWidth="3.8"
+                      />
+                      <path
+                        d="M26 33 L48 50 L26 67"
+                        fill="none"
+                        stroke="#fbbf24"
+                        strokeWidth="10.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <line
+                        x1="54"
+                        y1="66"
+                        x2="76"
+                        y2="66"
+                        stroke="#3fb950"
+                        strokeWidth="9.6"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    <div className="text-base font-semibold text-white">
+                      Shnex Workbench v0.3.9
+                    </div>
                   </div>
                   <div className="text-[#9ca3af]">
                     专为远程运行 Claude CLI / AI 编程优化的「桌面 + 手机接力工作台」。

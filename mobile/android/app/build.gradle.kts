@@ -12,8 +12,8 @@ android {
         applicationId = "dev.shnex.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 303
-        versionName = "0.3.3"
+        versionCode = 312
+        versionName = "0.3.12"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

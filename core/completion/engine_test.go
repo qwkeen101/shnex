@@ -129,3 +129,52 @@ func TestEngineAllFiveCompletionSources(t *testing.T) {
 		}
 	}
 }
+
+func TestCdDirectoryCompletionWithDotDirsAndNormalDirs(t *testing.T) {
+	ctx := context.Background()
+	eng := NewEngine(nil)
+
+	// 1. Fresh Ubuntu cloud server home directory with ONLY dot-directories (.ssh, .cache, .claude)
+	freshHome := t.TempDir()
+	for _, d := range []string{".ssh", ".cache", ".claude"} {
+		if err := os.MkdirAll(filepath.Join(freshHome, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(freshHome, ".bashrc"), []byte("# bashrc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	freshInsp := NewLocalInspector(freshHome)
+	cdFresh := eng.Suggest(ctx, freshInsp, SuggestRequest{Line: "cd ", Cwd: freshHome})
+	if len(cdFresh.Candidates) != 3 {
+		t.Fatalf("expected 3 hidden dirs (.claude/, .cache/, .ssh/) when no normal dirs exist, got %+v", cdFresh.Candidates)
+	}
+	if cdFresh.Candidates[0].Label != ".cache/" || cdFresh.Candidates[1].Label != ".claude/" || cdFresh.Candidates[2].Label != ".ssh/" {
+		t.Fatalf("unexpected dot-dir order: %+v", cdFresh.Candidates)
+	}
+
+	// 2. Once normal directories exist, normal directories always rank ABOVE dot-directories on `cd `
+	for _, d := range []string{"workspace", "app"} {
+		if err := os.MkdirAll(filepath.Join(freshHome, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cdMixed := eng.Suggest(ctx, freshInsp, SuggestRequest{Line: "cd ", Cwd: freshHome})
+	if len(cdMixed.Candidates) != 5 {
+		t.Fatalf("expected 5 total dirs (2 normal + 3 dot), got %+v", cdMixed.Candidates)
+	}
+	if cdMixed.Candidates[0].Label != "app/" || cdMixed.Candidates[1].Label != "workspace/" {
+		t.Fatalf("expected normal dirs first (app/, workspace/), got %+v", cdMixed.Candidates)
+	}
+
+	// 3. Empty leaf directory still offers `../` on `cd `
+	emptyLeaf := filepath.Join(freshHome, "workspace", "empty")
+	if err := os.MkdirAll(emptyLeaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cdEmpty := eng.Suggest(ctx, freshInsp, SuggestRequest{Line: "cd ", Cwd: emptyLeaf})
+	if len(cdEmpty.Candidates) != 1 || cdEmpty.Candidates[0].Label != "../" {
+		t.Fatalf("expected ../ fallback in empty leaf directory, got %+v", cdEmpty.Candidates)
+	}
+}

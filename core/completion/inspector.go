@@ -238,23 +238,44 @@ func NewRemoteSSHInspector(defaultCwd string, sess transport.Session) *RemoteSSH
 func (r *RemoteSSHInspector) IsWindows() bool    { return false }
 func (r *RemoteSSHInspector) DefaultCwd() string { return r.defaultCwd }
 
+// Prewarm opens the multiplexed SFTP subsystem and caches the initial home directory
+// listing in the background as soon as an SSH session starts, so the user's very first
+// `cd ` / `cat ` / `ls ` completion responds in <1ms even on 300ms+ transoceanic links.
+func (r *RemoteSSHInspector) Prewarm() {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_, _ = r.ListDir(ctx, r.defaultCwd)
+}
+
+func (r *RemoteSSHInspector) normalizeCacheKey(dir string) string {
+	d := strings.TrimSpace(dir)
+	if d == "" || d == "." || d == "~" {
+		if strings.TrimSpace(r.defaultCwd) != "" {
+			return strings.TrimSpace(r.defaultCwd)
+		}
+		return "~"
+	}
+	return d
+}
+
 func (r *RemoteSSHInspector) ListDir(ctx context.Context, dir string) ([]DirItem, error) {
 	if r.sftpProv == nil {
 		return nil, nil
 	}
+	cacheKey := r.normalizeCacheKey(dir)
 	target := strings.TrimSpace(dir)
 	if target == "" {
 		target = r.defaultCwd
 	}
 
 	r.mu.Lock()
-	if hit, ok := r.dirCache[target]; ok && time.Now().Before(hit.expiresAt) {
+	if hit, ok := r.dirCache[cacheKey]; ok && time.Now().Before(hit.expiresAt) {
 		r.mu.Unlock()
 		return hit.val, nil
 	}
 	r.mu.Unlock()
 
-	cCtx, cancel := context.WithTimeout(ctx, 1800*time.Millisecond)
+	cCtx, cancel := context.WithTimeout(ctx, 6000*time.Millisecond)
 	defer cancel()
 	_, entries, err := r.sftpProv.ListDir(cCtx, target)
 	if err != nil {
@@ -269,7 +290,7 @@ func (r *RemoteSSHInspector) ListDir(ctx context.Context, dir string) ([]DirItem
 	}
 
 	r.mu.Lock()
-	r.dirCache[target] = cachedEntry[[]DirItem]{val: items, expiresAt: time.Now().Add(2500 * time.Millisecond)}
+	r.dirCache[cacheKey] = cachedEntry[[]DirItem]{val: items, expiresAt: time.Now().Add(5 * time.Second)}
 	r.mu.Unlock()
 	return items, nil
 }
@@ -297,7 +318,7 @@ func (r *RemoteSSHInspector) GitBranches(ctx context.Context, cwd string) ([]str
 	}
 	r.mu.Unlock()
 
-	cCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	cCtx, cancel := context.WithTimeout(ctx, 4000*time.Millisecond)
 	defer cancel()
 	cmd := "cd " + relay.PosixQuote(dir) + " 2>/dev/null && git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null || true"
 	res, err := r.execProv.ExecCommand(cCtx, cmd)
@@ -338,7 +359,7 @@ func (r *RemoteSSHInspector) PackageScripts(ctx context.Context, cwd string) ([]
 	r.mu.Unlock()
 
 	pkgPath := path.Join(dir, "package.json")
-	cCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	cCtx, cancel := context.WithTimeout(ctx, 4000*time.Millisecond)
 	defer cancel()
 	raw, err := r.sftpProv.ReadFile(cCtx, pkgPath, 256*1024)
 	if err != nil {

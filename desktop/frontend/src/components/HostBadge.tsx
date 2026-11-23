@@ -137,15 +137,18 @@ export const HostBadge: React.FC<{
   icon?: string;
   badgeText?: string;
   color?: string;
-  size?: "xs" | "sm" | "lg";
+  size?: "xs" | "sm" | "md" | "lg";
 }> = ({ icon, badgeText, color = "#f59e0b", size = "sm" }) => {
   const dims =
     size === "lg"
-      ? "w-9 h-9 rounded-xl text-sm"
+      ? "w-11 h-11 rounded-2xl text-base"
+      : size === "md"
+      ? "w-9 h-9 rounded-xl text-xs"
       : size === "xs"
-      ? "w-4 h-4 rounded text-[9px]"
-      : "w-5 h-5 rounded-md text-[10px]";
-  const iconPx = size === "lg" ? 18 : size === "xs" ? 10 : 12;
+      ? "w-[18px] h-[18px] rounded-[5px] text-[9.5px]"
+      : "w-6 h-6 rounded-lg text-[11px]";
+  const iconPx =
+    size === "lg" ? 21 : size === "md" ? 18 : size === "xs" ? 11 : 13;
 
   return (
     <span

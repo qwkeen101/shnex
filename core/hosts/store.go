@@ -222,6 +222,9 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (HostProfile, error)
 		if err := s.bridge.SetSecret(ctx, secretRef, secretVal); err != nil {
 			return HostProfile{}, fmt.Errorf("hosts: save secret to keychain: %w", err)
 		}
+		if strings.TrimSpace(in.PrivateKeyPEM) != "" && in.Password != "" {
+			_ = s.bridge.SetSecret(ctx, secretRef+":pass", in.Password)
+		}
 		hasSecret = true
 	} else if !exists {
 		secretRef = fmt.Sprintf("shnex:host:%s:cred", id)

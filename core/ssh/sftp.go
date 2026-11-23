@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -26,6 +27,7 @@ func (s *Session) SetSFTPSudoPassword(password string) {
 	defer s.sftpMu.Unlock()
 	s.sudoPassword = password
 	s.shellFallback = false
+	s.sftpHomeDir = ""
 	if s.sftpClient != nil {
 		_ = s.sftpClient.Close()
 		s.sftpClient = nil
@@ -125,8 +127,34 @@ func (s *Session) getOrCreateSFTP(ctx context.Context) (*sftp.Client, bool, erro
 
 func (s *Session) openSFTPClientLocked(ctx context.Context) (*sftp.Client, interface{ Close() error }, error) {
 	if !s.sftpSudo {
-		c, err := sftp.NewClient(s.client)
-		return c, nil, err
+		subSess, err := s.client.NewSession()
+		if err != nil {
+			return nil, nil, err
+		}
+		stdinPipe, err := subSess.StdinPipe()
+		if err != nil {
+			_ = subSess.Close()
+			return nil, nil, err
+		}
+		stdoutPipe, err := subSess.StdoutPipe()
+		if err != nil {
+			_ = subSess.Close()
+			return nil, nil, err
+		}
+		if err := subSess.RequestSubsystem("sftp"); err != nil {
+			_ = subSess.Close()
+			return nil, nil, err
+		}
+		stopCancel := context.AfterFunc(ctx, func() {
+			_ = subSess.Close()
+		})
+		c, err := sftp.NewClientPipe(stdoutPipe, stdinPipe)
+		stopCancel()
+		if err != nil {
+			_ = subSess.Close()
+			return nil, nil, err
+		}
+		return c, subSess, nil
 	}
 
 	noPasswd, pw, err := s.checkSudoModeLocked(ctx)
@@ -176,6 +204,38 @@ func (s *Session) openSFTPClientLocked(ctx context.Context) (*sftp.Client, inter
 	return c, subSess, nil
 }
 
+func (s *Session) resolveSFTPTarget(sc *sftp.Client, remotePath string) string {
+	s.sftpMu.Lock()
+	home := s.sftpHomeDir
+	s.sftpMu.Unlock()
+
+	ensureHome := func() string {
+		if home != "" {
+			return home
+		}
+		if wd, err := sc.Getwd(); err == nil && wd != "" {
+			s.sftpMu.Lock()
+			s.sftpHomeDir = wd
+			s.sftpMu.Unlock()
+			home = wd
+			return wd
+		}
+		return "/"
+	}
+
+	target := strings.TrimSpace(remotePath)
+	if target == "" || target == "." || target == "~" {
+		return ensureHome()
+	}
+	if strings.HasPrefix(target, "~/") {
+		return path.Join(ensureHome(), target[2:])
+	}
+	if !strings.HasPrefix(target, "/") {
+		return path.Join(ensureHome(), target)
+	}
+	return path.Clean(target)
+}
+
 // ListDir lists files and folders in remotePath via SFTP (with optional sudo) or shell/SCP fallback.
 func (s *Session) ListDir(ctx context.Context, remotePath string) (string, []transport.FileEntry, error) {
 	if err := ctx.Err(); err != nil {
@@ -189,18 +249,7 @@ func (s *Session) ListDir(ctx context.Context, remotePath string) (string, []tra
 		return s.shellListDir(ctx, remotePath)
 	}
 
-	target := strings.TrimSpace(remotePath)
-	if target == "" || target == "." || target == "~" {
-		wd, wErr := sc.Getwd()
-		if wErr == nil && wd != "" {
-			target = wd
-		} else {
-			target = "/"
-		}
-	} else {
-		target = path.Clean(target)
-	}
-
+	target := s.resolveSFTPTarget(sc, remotePath)
 	infos, err := sc.ReadDir(target)
 	if err != nil {
 		return "", nil, err
@@ -208,10 +257,17 @@ func (s *Session) ListDir(ctx context.Context, remotePath string) (string, []tra
 
 	entries := make([]transport.FileEntry, 0, len(infos))
 	for _, info := range infos {
+		fullEntryPath := path.Join(target, info.Name())
+		isDir := info.IsDir()
+		if !isDir && info.Mode()&os.ModeSymlink != 0 {
+			if st, sErr := sc.Stat(fullEntryPath); sErr == nil && st.IsDir() {
+				isDir = true
+			}
+		}
 		entries = append(entries, transport.FileEntry{
 			Name:    info.Name(),
-			Path:    path.Join(target, info.Name()),
-			IsDir:   info.IsDir(),
+			Path:    fullEntryPath,
+			IsDir:   isDir,
 			Size:    info.Size(),
 			Mode:    info.Mode().String(),
 			ModTime: info.ModTime(),
@@ -237,7 +293,7 @@ func (s *Session) ReadFile(ctx context.Context, remotePath string, maxBytes int6
 	if useShell {
 		return s.shellReadFile(ctx, remotePath, maxBytes)
 	}
-	f, err := sc.Open(remotePath)
+	f, err := sc.Open(s.resolveSFTPTarget(sc, remotePath))
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +424,9 @@ func (s *Session) runFileShellScript(ctx context.Context, script string, extraSt
 func (s *Session) shellListDir(ctx context.Context, remotePath string) (string, []transport.FileEntry, error) {
 	target := strings.TrimSpace(remotePath)
 	cdExpr := "cd ."
-	if target != "" && target != "." && target != "~" {
+	if strings.HasPrefix(target, "~/") {
+		cdExpr = "cd && cd -- " + relay.PosixQuote(path.Clean(target[2:]))
+	} else if target != "" && target != "." && target != "~" {
 		cdExpr = "cd -- " + relay.PosixQuote(path.Clean(target))
 	}
 	script := cdExpr + ` && pwd && (LC_ALL=C ls -la --time-style=+%s 2>/dev/null || LC_ALL=C ls -la)`

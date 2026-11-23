@@ -113,3 +113,65 @@ html[data-theme="slate"] .shnex-dot-grid {
 .xterm {
   padding: 6px 8px;
 }
+
+/* Keep xterm's hidden IME textarea inside the viewport with non-zero cell bounds
+   so Windows WebView2 (TSF / IMM32) always anchors the IME candidate window
+   directly under the terminal cursor instead of falling back to screen (0, 0). */
+.xterm .xterm-helpers {
+  top: 6px !important;
+  left: 8px !important;
+}
+
+.xterm .xterm-helper-textarea {
+  left: 0px;
+  top: 0px;
+  width: 1ch;
+  min-width: 8px;
+  height: 1.25em;
+  min-height: 16px;
+  line-height: 1.25em;
+  opacity: 0 !important;
+  color: transparent !important;
+  background: transparent !important;
+  caret-color: transparent !important;
+  pointer-events: none;
+  z-index: 2 !important;
+}
+
+.xterm .composition-view {
+  background: #1e222b;
+  color: #f3f4f6;
+  border-bottom: 1.5px solid #60a5fa;
+  border-radius: 2px;
+  padding: 0 2px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+@keyframes shnex-dot-wave {
+  0%, 80%, 100% {
+    transform: translateY(0) scale(0.78);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-3px) scale(1.12);
+    opacity: 1;
+  }
+}
+
+@keyframes shnex-shimmer-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
+}
+
+.shnex-wave-dot {
+  animation: shnex-dot-wave 1.15s ease-in-out infinite;
+}
+
+.shnex-shimmer-bar {
+  animation: shnex-shimmer-sweep 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}

@@ -500,19 +500,24 @@ func (e *Engine) matchFilesystemPrefix(ctx context.Context, inspector WorkspaceI
 	}
 
 	items, err := inspector.ListDir(ctx, searchDir)
-	if err != nil || len(items) == 0 {
+	if err != nil {
 		return nil
 	}
 
 	baseLower := strings.ToLower(basePrefix)
 	showDotFiles := strings.HasPrefix(basePrefix, ".")
 
-	var out []Candidate
+	var normalOut []Candidate
+	var dotOut []Candidate
 	for _, it := range items {
+		if it.Name == "." || it.Name == ".." || it.Name == "" {
+			continue
+		}
 		if dirsOnly && !it.IsDir {
 			continue
 		}
-		if !showDotFiles && strings.HasPrefix(it.Name, ".") {
+		isDot := strings.HasPrefix(it.Name, ".")
+		if isDot && !showDotFiles && basePrefix != "" {
 			continue
 		}
 		if !strings.HasPrefix(strings.ToLower(it.Name), baseLower) {
@@ -526,10 +531,16 @@ func (e *Engine) matchFilesystemPrefix(ctx context.Context, inspector WorkspaceI
 		lbl := it.Name
 		if it.IsDir {
 			kind = KindDir
-			detail = "目录"
+			if isDot {
+				detail = "隐藏目录"
+			} else {
+				detail = "目录"
+			}
 			lbl = it.Name + "/"
+		} else if isDot {
+			detail = "隐藏文件"
 		}
-		out = append(out, Candidate{
+		cand := Candidate{
 			Label:       lbl,
 			InsertText:  ins,
 			GhostSuffix: ghost,
@@ -537,12 +548,45 @@ func (e *Engine) matchFilesystemPrefix(ctx context.Context, inspector WorkspaceI
 			Kind:        kind,
 			Source:      "当前目录",
 			Detail:      detail,
+		}
+		if isDot {
+			dotOut = append(dotOut, cand)
+		} else {
+			normalOut = append(normalOut, cand)
+		}
+	}
+
+	var out []Candidate
+	if showDotFiles {
+		out = dotOut
+	} else {
+		out = normalOut
+		// When browsing a directory with empty basePrefix (e.g. `cd `, `cd sub/`, `ls `, `cat `),
+		// include hidden dot-directories/files after normal items so fresh cloud servers
+		// (where `~` often only has `.ssh/`, `.claude/`, `.config/`) still present candidates!
+		if basePrefix == "" && len(dotOut) > 0 {
+			out = append(out, dotOut...)
+		}
+	}
+
+	// If `cd ` is invoked in an empty leaf directory, offer `../` so the user can still navigate up
+	if dirsOnly && len(out) == 0 && basePrefix == "" && dirPrefix == "" && searchDir != "/" {
+		ins, ghost, repLen := buildShellSafeCompletion(activeRaw, rawPath, quoteChar, "..", false, true)
+		out = append(out, Candidate{
+			Label:       "../",
+			InsertText:  ins,
+			GhostSuffix: ghost,
+			ReplaceLen:  repLen,
+			Kind:        KindDir,
+			Source:      "上级目录",
+			Detail:      "返回上一级",
 		})
 	}
 	return out
 }
 
 func (e *Engine) sortCandidates(typedUnquoted string, cands []Candidate) {
+	typedDot := strings.HasPrefix(typedUnquoted, ".")
 	sort.SliceStable(cands, func(i, j int) bool {
 		// 1. History boost strictly among discovered candidates ("历史只给已发现的候选排序")
 		si := e.scoreOf(cands[i].Kind, cands[i].Label)
@@ -550,7 +594,15 @@ func (e *Engine) sortCandidates(typedUnquoted string, cands []Candidate) {
 		if si != sj {
 			return si > sj
 		}
-		// 2. Exact case-sensitive prefix match beats case-insensitive match
+		// 2. Non-hidden entries always precede dot-entries unless user typed leading `.`
+		if !typedDot {
+			di := strings.HasPrefix(path.Base(strings.TrimSuffix(cands[i].Label, "/")), ".")
+			dj := strings.HasPrefix(path.Base(strings.TrimSuffix(cands[j].Label, "/")), ".")
+			if di != dj {
+				return !di
+			}
+		}
+		// 3. Exact case-sensitive prefix match beats case-insensitive match
 		if typedUnquoted != "" {
 			ci := strings.HasPrefix(cands[i].Label, typedUnquoted)
 			cj := strings.HasPrefix(cands[j].Label, typedUnquoted)
@@ -558,7 +610,7 @@ func (e *Engine) sortCandidates(typedUnquoted string, cands []Candidate) {
 				return ci
 			}
 		}
-		// 3. Directories before files when browsing paths, otherwise shorter/cleaner names first
+		// 4. Directories before files when browsing paths, otherwise alphabetical
 		if cands[i].Kind != cands[j].Kind {
 			if cands[i].Kind == KindDir && cands[j].Kind == KindFile {
 				return true

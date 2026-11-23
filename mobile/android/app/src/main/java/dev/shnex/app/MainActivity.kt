@@ -1,6 +1,7 @@
 package dev.shnex.app
 
 import android.Manifest
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -22,9 +23,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -36,18 +39,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
@@ -83,17 +84,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -101,6 +102,7 @@ import androidx.compose.ui.unit.sp
 import dev.shnex.app.data.HostItem
 import dev.shnex.app.service.ShnexRelayService
 import dev.shnex.app.terminal.TerminalCanvasView
+import dev.shnex.app.terminal.rememberTerminalImeController
 import dev.shnex.app.ui.BottomNavTab
 import dev.shnex.app.ui.NativeMarkdownDocumentView
 import dev.shnex.app.ui.WorkbenchViewModel
@@ -186,6 +188,10 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
     var showQuickConnectDialog by remember { mutableStateOf(false) }
     var showFabMenu by remember { mutableStateOf(false) }
 
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > with(density) { 80.dp.toPx() }
+    val hideBottomNav = vm.currentNav == BottomNavTab.SESSIONS && imeVisible
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -195,67 +201,69 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
             .imePadding(),
         containerColor = Color(0xFF121316),
         bottomBar = {
-            NavigationBar(
-                containerColor = Color(0xFF1B1C22),
-                tonalElevation = 0.dp,
-                modifier = Modifier.height(64.dp)
-            ) {
-                NavigationBarItem(
-                    selected = vm.currentNav == BottomNavTab.HOSTS,
-                    onClick = { vm.currentNav = BottomNavTab.HOSTS },
-                    icon = { Icon(Icons.Default.Dns, contentDescription = "主机", modifier = Modifier.size(19.dp)) },
-                    label = { Text("主机", fontSize = 11.sp) },
-                    colors = NavigationBarItemDefaults.colors(
-                        indicatorColor = Color(0xFF2B2F3C),
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color.White,
-                        unselectedIconColor = Color(0xFF8B909A),
-                        unselectedTextColor = Color(0xFF8B909A)
-                    )
-                )
-                NavigationBarItem(
-                    selected = vm.currentNav == BottomNavTab.SESSIONS,
-                    onClick = { vm.currentNav = BottomNavTab.SESSIONS },
-                    icon = {
-                        Box {
-                            Icon(Icons.Default.Terminal, contentDescription = "会话", modifier = Modifier.size(19.dp))
-                            if (vm.hasAnyPendingApproval) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .size(7.dp)
-                                        .background(Color(0xFFF59E0B), CircleShape)
-                                )
-                            }
-                        }
-                    },
-                    label = {
-                        Text(
-                            text = if (vm.tabs.isNotEmpty()) "会话 (${vm.tabs.size})" else "会话",
-                            fontSize = 11.sp
+            if (!hideBottomNav) {
+                NavigationBar(
+                    containerColor = Color(0xFF1B1C22),
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.height(64.dp)
+                ) {
+                    NavigationBarItem(
+                        selected = vm.currentNav == BottomNavTab.HOSTS,
+                        onClick = { vm.currentNav = BottomNavTab.HOSTS },
+                        icon = { Icon(Icons.Default.Dns, contentDescription = "主机", modifier = Modifier.size(19.dp)) },
+                        label = { Text("主机", fontSize = 11.sp) },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = Color(0xFF2B2F3C),
+                            selectedIconColor = Color.White,
+                            selectedTextColor = Color.White,
+                            unselectedIconColor = Color(0xFF8B909A),
+                            unselectedTextColor = Color(0xFF8B909A)
                         )
-                    },
-                    colors = NavigationBarItemDefaults.colors(
-                        indicatorColor = Color(0xFF2B2F3C),
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color.White,
-                        unselectedIconColor = Color(0xFF8B909A),
-                        unselectedTextColor = Color(0xFF8B909A)
                     )
-                )
-                NavigationBarItem(
-                    selected = vm.currentNav == BottomNavTab.SETTINGS,
-                    onClick = { vm.currentNav = BottomNavTab.SETTINGS },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "设置", modifier = Modifier.size(19.dp)) },
-                    label = { Text("设置", fontSize = 11.sp) },
-                    colors = NavigationBarItemDefaults.colors(
-                        indicatorColor = Color(0xFF2B2F3C),
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color.White,
-                        unselectedIconColor = Color(0xFF8B909A),
-                        unselectedTextColor = Color(0xFF8B909A)
+                    NavigationBarItem(
+                        selected = vm.currentNav == BottomNavTab.SESSIONS,
+                        onClick = { vm.currentNav = BottomNavTab.SESSIONS },
+                        icon = {
+                            Box {
+                                Icon(Icons.Default.Terminal, contentDescription = "会话", modifier = Modifier.size(19.dp))
+                                if (vm.hasAnyPendingApproval) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(7.dp)
+                                            .background(Color(0xFFF59E0B), CircleShape)
+                                    )
+                                }
+                            }
+                        },
+                        label = {
+                            Text(
+                                text = if (vm.tabs.isNotEmpty()) "会话 (${vm.tabs.size})" else "会话",
+                                fontSize = 11.sp
+                            )
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = Color(0xFF2B2F3C),
+                            selectedIconColor = Color.White,
+                            selectedTextColor = Color.White,
+                            unselectedIconColor = Color(0xFF8B909A),
+                            unselectedTextColor = Color(0xFF8B909A)
+                        )
                     )
-                )
+                    NavigationBarItem(
+                        selected = vm.currentNav == BottomNavTab.SETTINGS,
+                        onClick = { vm.currentNav = BottomNavTab.SETTINGS },
+                        icon = { Icon(Icons.Default.Settings, contentDescription = "设置", modifier = Modifier.size(19.dp)) },
+                        label = { Text("设置", fontSize = 11.sp) },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = Color(0xFF2B2F3C),
+                            selectedIconColor = Color.White,
+                            selectedTextColor = Color.White,
+                            unselectedIconColor = Color(0xFF8B909A),
+                            unselectedTextColor = Color(0xFF8B909A)
+                        )
+                    )
+                }
             }
         }
     ) { innerPad ->
@@ -296,6 +304,7 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
 
                     BottomNavTab.SESSIONS -> SessionsScreen(
                         vm = vm,
+                        imeVisible = imeVisible,
                         onPickImageForClaude = { claudeImagePicker.launch("image/*") },
                         onOpenMathDemo = { vm.openMarkdownSampleTab() }
                     )
@@ -330,7 +339,7 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
         HostEditDialog(
             initial = editingHost,
             onDismiss = { showHostDialog = false },
-            onSave = { name, host, port, user, pw, pk, tmux, tsnet, script ->
+            onSave = { name, host, port, user, pw, pk, tmux, tsnet, script, onDone ->
                 vm.saveHost(
                     id = editingHost?.id,
                     name = name,
@@ -341,9 +350,14 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
                     privateKeyPem = pk,
                     tmuxSession = tmux,
                     useTsnet = tsnet,
-                    postLoginScript = script
+                    postLoginScript = script,
+                    onResult = { res ->
+                        onDone(res.exceptionOrNull()?.message)
+                        if (res.isSuccess) {
+                            showHostDialog = false
+                        }
+                    }
                 )
-                showHostDialog = false
             }
         )
     }
@@ -471,7 +485,7 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
                                             Text("M↓", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                         }
                                     } else {
-                                        Icon(Icons.Default.InsertDriveFile, null, tint = Color(0xFF9CA3AF), modifier = Modifier.size(18.dp))
+                                        Icon(Icons.AutoMirrored.Filled.InsertDriveFile, null, tint = Color(0xFF9CA3AF), modifier = Modifier.size(18.dp))
                                     }
                                     Spacer(Modifier.width(10.dp))
                                     Column {
@@ -617,7 +631,11 @@ private fun HostsScreen(
                                             }
                                             if (vm.connectingHostId == hp.id) {
                                                 Spacer(Modifier.width(8.dp))
-                                                Text("连接中...", color = Color(0xFF60A5FA), fontSize = 11.sp)
+                                                CircularProgressIndicator(
+                                                    color = Color(0xFF60A5FA),
+                                                    strokeWidth = 2.dp,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
                                             }
                                         }
                                         val tags = buildList {
@@ -716,11 +734,13 @@ private fun HostsScreen(
 @Composable
 private fun SessionsScreen(
     vm: WorkbenchViewModel,
+    imeVisible: Boolean,
     onPickImageForClaude: () -> Unit,
     onOpenMathDemo: () -> Unit
 ) {
+    val context = LocalContext.current
     val active = vm.activeTab
-    var inputText by remember { mutableStateOf("") }
+    val imeController = rememberTerminalImeController()
     var ctrlArmed by remember { mutableStateOf(false) }
 
     if (active == null) {
@@ -736,6 +756,13 @@ private fun SessionsScreen(
             }
         }
         return
+    }
+
+    LaunchedEffect(active.tabId) {
+        imeController.resetState()
+        if (!active.isMarkdown && imeVisible) {
+            imeController.showKeyboard()
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -835,7 +862,7 @@ private fun SessionsScreen(
             }
         }
 
-        // 2. Center Stage: Native Markdown Math Sheet OR TrueColor Terminal Canvas
+        // 2. Center Stage: Native Markdown Math Sheet OR Direct-IME TrueColor Terminal Canvas
         if (active.isMarkdown && active.markdownDoc != null) {
             NativeMarkdownDocumentView(
                 doc = active.markdownDoc,
@@ -845,13 +872,28 @@ private fun SessionsScreen(
             TerminalCanvasView(
                 buffer = active.buffer,
                 renderTick = active.renderTick,
+                imeController = imeController,
+                onInterceptCtrlLetter = { ch ->
+                    val low = ch.lowercaseChar()
+                    if (ctrlArmed && low in 'a'..'z') {
+                        val code = (low.code - 'a'.code + 1).toChar()
+                        vm.sendTerminalText(code.toString())
+                        ctrlArmed = false
+                        true
+                    } else {
+                        false
+                    }
+                },
+                onTerminalInput = { text, useBracketedPaste ->
+                    vm.sendTerminalText(text, useBracketedIfEnabled = useBracketedPaste)
+                },
                 onTerminalResize = { cols, rows ->
                     active.socket?.sendResize(cols, rows)
                 },
                 modifier = Modifier.weight(1f)
             )
 
-            // 3. Contextual Slim Claude Approval Strip (Matches mobile_m3_preview.html!)
+            // 3. Contextual Slim Claude Approval Strip
             active.approvalSnippet?.let { snippet ->
                 Row(
                     modifier = Modifier
@@ -906,147 +948,50 @@ private fun SessionsScreen(
                 }
             }
 
-            // 4. Native Completion Strip (Powered by core/completion!)
-            if (vm.completionItems.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF171920))
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    for (cand in vm.completionItems) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF252834))
-                                .clickable {
-                                    val keepLen = (inputText.length - cand.replaceLen).coerceAtLeast(0)
-                                    inputText = inputText.take(keepLen) + cand.insertText
-                                    vm.queryInputCompletions(inputText)
-                                }
-                                .padding(horizontal = 9.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = cand.label,
-                                color = Color(0xFFE5E7EB),
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 5. Slim Extra Key Row + Chinese/Voice-Friendly Input Bar (Matches mobile_m3_preview.html!)
-            Column(
+            // 4. Single Slim Extra Key Strip (Tap anywhere on terminal canvas to type directly!)
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF1B1C22))
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    val appCur = active.buffer.appCursorKeys
-                    ExtraKeyChip("Esc") { vm.sendTerminalText("\u001b") }
-                    ExtraKeyChip("Tab") { vm.sendTerminalText("\t") }
-                    ExtraKeyChip("S-Tab") { vm.sendTerminalText("\u001b[Z") }
-                    ExtraKeyChip("Ctrl", highlighted = ctrlArmed) { ctrlArmed = !ctrlArmed }
-                    ExtraKeyChip("^C") { vm.sendTerminalText("\u0003") }
-                    ExtraKeyChip("↑") { vm.sendTerminalText(if (appCur) "\u001bOA" else "\u001b[A") }
-                    ExtraKeyChip("↓") { vm.sendTerminalText(if (appCur) "\u001bOB" else "\u001b[B") }
-                    ExtraKeyChip("←") { vm.sendTerminalText(if (appCur) "\u001bOD" else "\u001b[D") }
-                    ExtraKeyChip("→") { vm.sendTerminalText(if (appCur) "\u001bOC" else "\u001b[C") }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    BasicTextField(
-                        value = inputText,
-                        onValueChange = { next ->
-                            if (ctrlArmed && next.length == inputText.length + 1) {
-                                val ch = next.last().lowercaseChar()
-                                if (ch in 'a'..'z') {
-                                    val code = (ch.code - 'a'.code + 1).toChar()
-                                    vm.sendTerminalText(code.toString())
-                                    ctrlArmed = false
-                                    return@BasicTextField
-                                }
-                            }
-                            inputText = next
-                            vm.queryInputCompletions(next)
-                        },
-                        singleLine = true,
-                        textStyle = TextStyle(
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        cursorBrush = SolidColor(Color(0xFF60A5FA)),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(
-                            onSend = {
-                                if (inputText.isNotEmpty()) {
-                                    vm.sendTerminalText("$inputText\r")
-                                    inputText = ""
-                                    vm.completionItems.clear()
-                                } else {
-                                    vm.sendTerminalText("\r")
-                                }
-                            }
-                        ),
-                        decorationBox = { innerField ->
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF121316), RoundedCornerShape(10.dp))
-                                    .border(1.dp, Color(0xFF2E313D), RoundedCornerShape(10.dp))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp)
-                            ) {
-                                if (inputText.isEmpty()) {
-                                    Text(
-                                        "直接敲命令，或中文/语音输入...",
-                                        color = Color(0xFF6B7280),
-                                        fontSize = 12.sp
-                                    )
-                                }
-                                innerField()
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
+                val appCur = active.buffer.appCursorKeys
+                val sendSpecial: (String, Boolean) -> Unit = { seq, commitFirst ->
+                    imeController.sendSpecialKey(
+                        seq = seq,
+                        commitComposingFirst = commitFirst,
+                        fallbackSend = { vm.sendTerminalText(it) }
                     )
-
-                    Surface(
-                        color = Color(0xFFF3F4F6),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .clickable {
-                                if (inputText.isNotEmpty()) {
-                                    vm.sendTerminalText("$inputText\r")
-                                    inputText = ""
-                                    vm.completionItems.clear()
-                                } else {
-                                    vm.sendTerminalText("\r")
-                                }
-                            }
-                    ) {
-                        Text(
-                            text = "↵",
-                            color = Color(0xFF121316),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp,
-                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp)
-                        )
+                }
+                ExtraKeyChip("Esc") { sendSpecial("\u001b", false) }
+                ExtraKeyChip("Tab") { sendSpecial("\t", true) }
+                ExtraKeyChip("S-Tab") { sendSpecial("\u001b[Z", true) }
+                ExtraKeyChip("Ctrl", highlighted = ctrlArmed) { ctrlArmed = !ctrlArmed }
+                ExtraKeyChip("^C") { sendSpecial("\u0003", false) }
+                ExtraKeyChip("↑") { sendSpecial(if (appCur) "\u001bOA" else "\u001b[A", true) }
+                ExtraKeyChip("↓") { sendSpecial(if (appCur) "\u001bOB" else "\u001b[B", true) }
+                ExtraKeyChip("←") { sendSpecial(if (appCur) "\u001bOD" else "\u001b[D", true) }
+                ExtraKeyChip("→") { sendSpecial(if (appCur) "\u001bOC" else "\u001b[C", true) }
+                ExtraKeyChip("粘贴") {
+                    val cm = context.getSystemService(ClipboardManager::class.java)
+                    val clip = cm?.primaryClip
+                        ?.takeIf { it.itemCount > 0 }
+                        ?.getItemAt(0)
+                        ?.coerceToText(context)
+                        ?.toString()
+                        .orEmpty()
+                    if (clip.isNotEmpty()) {
+                        imeController.resetState()
+                        val normalized = clip.replace("\r\n", "\r").replace("\n", "\r")
+                        vm.sendTerminalText(normalized, useBracketedIfEnabled = true)
                     }
+                }
+                ExtraKeyChip("↵") { sendSpecial("\r", true) }
+                ExtraKeyChip("键盘", highlighted = imeVisible) {
+                    imeController.toggleKeyboard(imeVisible)
                 }
             }
         }
@@ -1188,7 +1133,7 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                 .border(1.dp, Color(0xFF2C2F3A), RoundedCornerShape(18.dp))
         ) {
             Column(modifier = Modifier.padding(15.dp)) {
-                Text("Shnex Android v0.3.3", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("Shnex Android v0.3.12", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "架构：Go 单核引擎 (127.0.0.1 进程内桥接) + Jetpack Compose M3 + 纯原生真彩终端与矢量公式渲染（零 WebView、零 GPL 依赖）",
@@ -1264,115 +1209,253 @@ private fun HostEditDialog(
         privateKeyPem: String,
         tmuxSession: String,
         useTsnet: Boolean,
-        postLoginScript: String
+        postLoginScript: String,
+        onDone: (errorMessage: String?) -> Unit
     ) -> Unit
 ) {
-    var name by remember { mutableStateOf(initial?.name ?: "") }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val scrollState = rememberScrollState()
+
     var host by remember { mutableStateOf(initial?.host ?: "") }
     var portStr by remember { mutableStateOf((initial?.port ?: 22).toString()) }
-    var user by remember { mutableStateOf(initial?.user ?: "root") }
+    var name by remember { mutableStateOf(initial?.name ?: "") }
+    var user by remember { mutableStateOf(initial?.user ?: "ubuntu") }
     var password by remember { mutableStateOf("") }
     var privateKey by remember { mutableStateOf("") }
     var tmuxSession by remember { mutableStateOf(initial?.tmuxSession ?: "main") }
     var useTsnet by remember { mutableStateOf(initial?.useTsnet ?: false) }
     var postScript by remember { mutableStateOf(initial?.postLoginScript ?: "") }
 
+    var hostMissingError by remember { mutableStateOf(false) }
+    var formError by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+
+    val pemFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.bufferedReader(Charsets.UTF_8).readText()
+                }
+            }.onSuccess { content ->
+                if (!content.isNullOrBlank()) {
+                    privateKey = content.trim()
+                    formError = null
+                }
+            }.onFailure { e ->
+                formError = "读取私钥文件失败: ${e.message}"
+            }
+        }
+    }
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!saving) onDismiss() },
         title = { Text(if (initial == null) "新建主机" else "编辑主机", fontSize = 16.sp) },
         text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("名称 (如 aws / 新加坡)") },
-                    singleLine = true
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = host,
-                        onValueChange = { host = it },
-                        label = { Text("主机地址") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = portStr,
-                        onValueChange = { portStr = it },
-                        label = { Text("端口") },
-                        singleLine = true,
-                        modifier = Modifier.width(82.dp)
-                    )
-                }
-                OutlinedTextField(
-                    value = user,
-                    onValueChange = { user = it },
-                    label = { Text("用户名") },
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = {
-                        Text(
-                            if (initial?.hasSecret == true) "密码 (已加密保存，留空不变)"
-                            else "密码 (存入 Keystore)"
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(scrollState),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = host,
+                            onValueChange = {
+                                host = it
+                                if (it.isNotBlank()) hostMissingError = false
+                                formError = null
+                            },
+                            label = { Text("主机地址 (必填 IP/域名) *") },
+                            placeholder = { Text("如 108.137.19.108") },
+                            isError = hostMissingError,
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
                         )
-                    },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation()
-                )
-                OutlinedTextField(
-                    value = privateKey,
-                    onValueChange = { privateKey = it },
-                    label = { Text("私钥 PEM (可选，粘贴整段私钥)") },
-                    maxLines = 3
-                )
-                OutlinedTextField(
-                    value = tmuxSession,
-                    onValueChange = { tmuxSession = it },
-                    label = { Text("tmux 会话 (桌面/手机无缝接力，留空关闭)") },
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = postScript,
-                    onValueChange = { postScript = it },
-                    label = { Text("登录后执行命令 (可选)") },
-                    maxLines = 2
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = useTsnet, onCheckedChange = { useTsnet = it })
-                    Text("通过内置 Tailscale / Headscale 直连", fontSize = 12.sp)
+                        OutlinedTextField(
+                            value = portStr,
+                            onValueChange = { portStr = it },
+                            label = { Text("端口") },
+                            singleLine = true,
+                            modifier = Modifier.width(82.dp)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = {
+                            name = it
+                            formError = null
+                        },
+                        label = { Text("备注名称 (可选，留空自动用地址)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = user,
+                        onValueChange = { user = it },
+                        label = { Text("用户名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = {
+                            Text(
+                                if (initial?.hasSecret == true) "密码 / 私钥口令 (已保存，留空不变)"
+                                else "密码 / 私钥口令 (存入 Keystore)"
+                            )
+                        },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (privateKey.contains("BEGIN ")) "已载入 PEM 私钥" else "SSH 私钥 (可选)",
+                            color = if (privateKey.contains("BEGIN ")) Color(0xFF4ADE80) else Color(0xFF9CA3AF),
+                            fontSize = 12.sp
+                        )
+                        TextButton(
+                            onClick = { pemFilePicker.launch("*/*") },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("导入私钥文件 (.pem)", fontSize = 12.sp)
+                        }
+                    }
+                    OutlinedTextField(
+                        value = privateKey,
+                        onValueChange = {
+                            privateKey = it
+                            formError = null
+                        },
+                        label = { Text("私钥 PEM (粘贴整段或点击上方导入文件)") },
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = tmuxSession,
+                        onValueChange = { tmuxSession = it },
+                        label = { Text("tmux 会话 (桌面/手机无缝接力，留空关闭)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = postScript,
+                        onValueChange = { postScript = it },
+                        label = { Text("登录后执行命令 (可选)") },
+                        maxLines = 2,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = useTsnet, onCheckedChange = { useTsnet = it })
+                        Text("通过内置 Tailscale / Headscale 直连", fontSize = 12.sp)
+                    }
+                }
+
+                formError?.let { errText ->
+                    Surface(
+                        color = Color(0xFF3B181E),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFFEF4444), RoundedCornerShape(10.dp))
+                    ) {
+                        Text(
+                            text = errText,
+                            color = Color(0xFFFCA5A5),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
+                enabled = !saving,
                 onClick = {
-                    val cleanHost = host.trim()
-                    if (cleanHost.isEmpty()) return@Button
-                    val cleanName = name.trim().ifEmpty { cleanHost }
+                    var rawHost = host.trim().removePrefix("ssh ").trim()
+                    var resolvedUser = user.trim()
+                    var resolvedPort = portStr.trim().toIntOrNull() ?: 22
+
+                    // Fallback if user accidentally typed IP/domain/user@host into the Name field
+                    if (rawHost.isEmpty() && (name.contains(".") || name.contains("@") || name.contains(":"))) {
+                        rawHost = name.trim().removePrefix("ssh ").trim()
+                    }
+
+                    // Support pasting `ubuntu@108.137.19.108:22` directly
+                    if (rawHost.contains("@")) {
+                        val uPart = rawHost.substringBefore("@").trim()
+                        if (uPart.isNotEmpty()) resolvedUser = uPart
+                        rawHost = rawHost.substringAfter("@").trim()
+                    }
+                    if (rawHost.count { it == ':' } == 1) {
+                        val pPart = rawHost.substringAfterLast(":").toIntOrNull()
+                        if (pPart != null && pPart in 1..65535) {
+                            resolvedPort = pPart
+                            rawHost = rawHost.substringBeforeLast(":").trim()
+                        }
+                    }
+
+                    if (rawHost.isEmpty()) {
+                        hostMissingError = true
+                        formError = "请填写服务器主机地址（如 IP 或域名）"
+                        scope.launch { scrollState.animateScrollTo(0) }
+                        return@Button
+                    }
+
+                    val trimmedKey = privateKey.trim()
+                    if (trimmedKey.isNotEmpty() && !trimmedKey.contains("-----BEGIN ")) {
+                        formError = "私钥内容不完整：缺少 -----BEGIN ... PRIVATE KEY----- 头部，请粘贴整段私钥或点击「导入私钥文件」"
+                        return@Button
+                    }
+
+                    val cleanName = name.trim().ifEmpty { rawHost }
+                    saving = true
+                    formError = null
                     onSave(
                         cleanName,
-                        cleanHost,
-                        portStr.toIntOrNull() ?: 22,
-                        user.trim().ifEmpty { "root" },
+                        rawHost,
+                        resolvedPort,
+                        resolvedUser.ifEmpty { "root" },
                         password,
-                        privateKey,
+                        trimmedKey,
                         tmuxSession.trim(),
                         useTsnet,
                         postScript
-                    )
+                    ) { errMsg ->
+                        saving = false
+                        if (errMsg != null) {
+                            formError = "保存失败：$errMsg"
+                        }
+                    }
                 }
             ) {
-                Text("保存")
+                if (saving) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("保存中")
+                } else {
+                    Text("保存")
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(enabled = !saving, onClick = onDismiss) { Text("取消") }
         }
     )
 }

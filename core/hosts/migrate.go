@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shnex/shnex/core/dialer"
 	"github.com/shnex/shnex/core/transport"
 )
 
@@ -144,15 +145,17 @@ func (s *Store) ImportSSHConfigText(ctx context.Context, content string, homeDir
 	return imported, nil
 }
 
-// PingHostTCP measures TCP connect latency in milliseconds to a saved host.
+// PingHostTCP measures TCP connect latency in milliseconds to a saved host
+// (falling back to OS/environment proxy if direct TCP is unreachable).
 func PingHostTCP(ctx context.Context, host string, port int) (int64, error) {
 	if port <= 0 {
 		port = 22
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	d := net.Dialer{Timeout: 4 * time.Second}
+	sd := dialer.NewSmartDirectDialer(4*time.Second, 0)
+	sd.StaggerDelay = 500 * time.Millisecond
 	start := time.Now()
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := sd.Dial(ctx, addr)
 	if err != nil {
 		return -1, err
 	}
