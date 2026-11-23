@@ -227,7 +227,6 @@ export const App: React.FC = () => {
   >(null);
   const [hostMenuId, setHostMenuId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const [showLocalShellMenu, setShowLocalShellMenu] = useState(false);
   const mdFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Password Fallback Prompt Modal (for AuthMode="auto")
@@ -698,7 +697,6 @@ export const App: React.FC = () => {
   };
 
   const openLocalTerminal = async (shellOverride?: string) => {
-    setShowLocalShellMenu(false);
     const shellKey =
       shellOverride || appSettings?.terminal.default_shell || "powershell";
     try {
@@ -737,7 +735,6 @@ export const App: React.FC = () => {
   };
 
   const openSampleMarkdownTab = async () => {
-    setShowLocalShellMenu(false);
     const existing = tabs.find(
       (t) =>
         t.protocol === "markdown" && t.markdownData?.source.kind === "sample"
@@ -776,7 +773,6 @@ export const App: React.FC = () => {
   };
 
   const triggerLocalMarkdownPicker = async () => {
-    setShowLocalShellMenu(false);
     const dlg = await openNativeFileDialog("markdown", false);
     if (!dlg.supported) {
       mdFileInputRef.current?.click();
@@ -1308,80 +1304,6 @@ export const App: React.FC = () => {
               className="hidden"
               onChange={handleLocalMarkdownSelected}
             />
-
-            {/* Local Terminal + Markdown Document Quick Launch */}
-            <div className="relative flex items-center ml-0.5">
-              <button
-                onClick={() => openLocalTerminal()}
-                className="h-7 pl-2 pr-1.5 rounded-l-md hover:bg-[#272930] text-[#9ca3af] hover:text-white flex items-center gap-1 transition"
-                title="新建本地终端 (使用默认 Shell)"
-              >
-                <TerminalSquare size={13} />
-              </button>
-              <button
-                onClick={() => setShowLocalShellMenu((v) => !v)}
-                className="h-7 px-1 rounded-r-md hover:bg-[#272930] text-[#8b909a] hover:text-white flex items-center transition"
-                title="更多新建标签选项"
-              >
-                <ChevronDown size={11} />
-              </button>
-
-              <button
-                onClick={triggerLocalMarkdownPicker}
-                className="h-7 px-1.5 ml-0.5 rounded-md hover:bg-[#272930] text-[#9ca3af] hover:text-white font-mono font-bold text-[10px] flex items-center transition"
-                title="打开本地 Markdown 文档 (M↓ 原生数学公式排版)"
-              >
-                M↓
-              </button>
-
-              {showLocalShellMenu && (
-                <div
-                  onMouseLeave={() => setShowLocalShellMenu(false)}
-                  className="fixed top-9 ml-0 z-50 w-52 py-1 rounded-xl bg-[#22242a] border border-[#343741] shadow-2xl text-xs text-[#e5e7eb]"
-                >
-                  {(
-                    [
-                      ["powershell", "Windows PowerShell"],
-                      ["pwsh", "PowerShell 7 (pwsh)"],
-                      ["cmd", "命令提示符 (CMD)"],
-                      ["wsl", "WSL (Linux 子系统)"],
-                      ["gitbash", "Git Bash"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <button
-                      key={key}
-                      onClick={() => openLocalTerminal(key)}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#2f323c] flex items-center justify-between"
-                    >
-                      <span>{label}</span>
-                      {(appSettings?.terminal.default_shell || "powershell") ===
-                        key && (
-                        <span className="text-[10px] text-[#60a5fa]">默认</span>
-                      )}
-                    </button>
-                  ))}
-                  <div className="my-1 border-t border-[#31343e]" />
-                  <button
-                    onClick={triggerLocalMarkdownPicker}
-                    className="w-full px-3 py-1.5 text-left hover:bg-[#2f323c] flex items-center justify-between"
-                  >
-                    <span>打开本地 Markdown...</span>
-                    <span className="font-mono font-bold text-[10px] text-[#93c5fd]">
-                      M↓
-                    </span>
-                  </button>
-                  <button
-                    onClick={openSampleMarkdownTab}
-                    className="w-full px-3 py-1.5 text-left hover:bg-[#2f323c] flex items-center justify-between"
-                  >
-                    <span>数学公式排版示例</span>
-                    <span className="font-mono font-bold text-[10px] text-[#93c5fd]">
-                      M↓
-                    </span>
-                  </button>
-                </div>
-              )}
-            </div>
 
             {tabs.length > 0 && (
               <button

@@ -51,7 +51,6 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
@@ -524,31 +523,6 @@ private fun HostsScreen(
             .padding(14.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Shnex 接力主机", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        text = "${vm.hosts.size} 台已存主机  |  ${vm.tabs.count { !it.isMarkdown }} 个活跃会话",
-                        color = Color(0xFF8B909A),
-                        fontSize = 12.sp
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onOpenMathDemo) {
-                        Text("M↓ 公式演示", color = Color(0xFF93C5FD), fontSize = 12.sp)
-                    }
-                    IconButton(onClick = { vm.pingHosts() }) {
-                        Icon(Icons.Default.Speed, contentDescription = "测速", tint = Color(0xFF9CA3AF))
-                    }
-                }
-            }
-
             if (vm.hosts.isEmpty()) {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
