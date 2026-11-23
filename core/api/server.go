@@ -653,7 +653,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notifyApproval := req.NotifyOnApproval || req.NotifyOnIdle
-	ms := newManagedSession(sess, req.User, req.Relay, size, s.bridge, logWriter, compInsp, req.NotifyOnBell, notifyApproval, req.NotifyOnIdle, func(id string) {
+	ms := newManagedSession(sess, req.User, req.Relay, size, s.bridge, logWriter, compInsp, req.NotifyOnBell, notifyApproval, func(id string) {
 		s.mu.Lock()
 		delete(s.sessions, id)
 		s.mu.Unlock()
@@ -910,7 +910,6 @@ type managedSession struct {
 	compInspector  completion.WorkspaceInspector
 	notifyBell     bool
 	notifyApproval bool
-	notifyIdle     bool
 	onTerminated   func(id string)
 
 	scrollback *ringBuffer
@@ -936,7 +935,6 @@ func newManagedSession(
 	compInspector completion.WorkspaceInspector,
 	notifyBell bool,
 	notifyApproval bool,
-	notifyIdle bool,
 	onTerminated func(id string),
 ) *managedSession {
 	return &managedSession{
@@ -949,7 +947,6 @@ func newManagedSession(
 		compInspector:  compInspector,
 		notifyBell:     notifyBell,
 		notifyApproval: notifyApproval,
-		notifyIdle:     notifyIdle,
 		onTerminated:   onTerminated,
 		scrollback:     newRingBuffer(64 * 1024),
 		size:           initialSize,
@@ -980,15 +977,6 @@ func (m *managedSession) start() {
 						Title:     fmt.Sprintf("Claude 等待人工审批 - %s", m.sess.Target()),
 						Body:      ev.PromptSnippet,
 						Category:  platform.CategoryActionRequired,
-						SessionID: m.sess.ID(),
-					})
-				}
-			case transport.EventOutputSilence:
-				if m.notifyIdle {
-					_ = m.bridge.Notify(context.Background(), platform.Notification{
-						Title:     fmt.Sprintf("任务输出完成 - %s", m.sess.Target()),
-						Body:      fmt.Sprintf("活跃输出 %d 字节后已静默 %s，等待下一条指令", ev.BurstBytes, ev.QuietFor.Round(100*time.Millisecond)),
-						Category:  platform.CategoryTaskIdle,
 						SessionID: m.sess.ID(),
 					})
 				}

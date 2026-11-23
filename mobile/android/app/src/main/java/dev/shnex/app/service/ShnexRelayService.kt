@@ -164,7 +164,7 @@ class ShnexRelayService : Service() {
             "Claude 待审批与完工通知",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "当远程 Claude CLI 等待确认或任务完成静默时推送提醒"
+            description = "当远程 Claude CLI 等待确认时推送提醒"
             enableVibration(true)
         }
 
