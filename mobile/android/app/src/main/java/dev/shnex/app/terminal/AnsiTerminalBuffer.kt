@@ -9,16 +9,16 @@ import kotlin.math.min
 
 data class TermCell(
     var text: String = " ",
-    var fg: Int = DEFAULT_FG,
-    var bg: Int = DEFAULT_BG,
+    var fg: Int = COLOR_DEFAULT_FG,
+    var bg: Int = COLOR_DEFAULT_BG,
     var bold: Boolean = false,
     var inverse: Boolean = false,
     var underline: Boolean = false,
     var width: Int = 1 // 1 = normal, 2 = CJK wide lead, 0 = wide trailing spacer
 ) {
-    fun reset(bgColor: Int = DEFAULT_BG) {
+    fun reset(bgColor: Int = COLOR_DEFAULT_BG) {
         text = " "
-        fg = DEFAULT_FG
+        fg = COLOR_DEFAULT_FG
         bg = bgColor
         bold = false
         inverse = false
@@ -39,8 +39,19 @@ data class TerminalSnapshot(
     val scrollbackSize: Int
 )
 
-const val DEFAULT_FG: Int = 0xFFE5E7EB.toInt()
-const val DEFAULT_BG: Int = 0xFF121316.toInt()
+/**
+ * Cell colors are stored as semantic codes and resolved against the active
+ * TerminalColorScheme at draw time (see resolveColor), so switching schemes
+ * recolors the live screen and the whole scrollback:
+ *  - COLOR_DEFAULT_FG / COLOR_DEFAULT_BG: the scheme's default foreground / background
+ *  - colorIndexed(0..15): the scheme's 16 ANSI colors
+ *  - 0xFFRRGGBB (alpha always 0xFF): xterm-256 cube / grayscale and 24-bit true color
+ */
+const val COLOR_DEFAULT_FG: Int = 0x00000000
+const val COLOR_DEFAULT_BG: Int = 0x00000001
+const val COLOR_INDEXED_TAG: Int = 0x01
+
+fun colorIndexed(idx: Int): Int = (COLOR_INDEXED_TAG shl 24) or (idx and 15)
 
 /**
  * Pure-Kotlin VT100 / xterm-256color / 24-bit TrueColor Terminal Emulator.
@@ -81,8 +92,8 @@ class AnsiTerminalBuffer(
     private var scrollBottom = rows - 1
 
     // Current SGR Pen attributes
-    private var penFg = DEFAULT_FG
-    private var penBg = DEFAULT_BG
+    private var penFg = COLOR_DEFAULT_FG
+    private var penBg = COLOR_DEFAULT_BG
     private var penBold = false
     private var penInverse = false
     private var penUnderline = false
@@ -536,8 +547,8 @@ class AnsiTerminalBuffer(
         while (i < codes.size) {
             when (val code = codes[i]) {
                 0 -> {
-                    penFg = DEFAULT_FG
-                    penBg = DEFAULT_BG
+                    penFg = COLOR_DEFAULT_FG
+                    penBg = COLOR_DEFAULT_BG
                     penBold = false
                     penInverse = false
                     penUnderline = false
@@ -549,9 +560,9 @@ class AnsiTerminalBuffer(
                 24 -> penUnderline = false
                 27 -> penInverse = false
                 in 30..37 -> penFg = ansi16Color(code - 30 + if (penBold) 8 else 0)
-                39 -> penFg = DEFAULT_FG
+                39 -> penFg = COLOR_DEFAULT_FG
                 in 40..47 -> penBg = ansi16Color(code - 40)
-                49 -> penBg = DEFAULT_BG
+                49 -> penBg = COLOR_DEFAULT_BG
                 in 90..97 -> penFg = ansi16Color(code - 90 + 8)
                 in 100..107 -> penBg = ansi16Color(code - 100 + 8)
                 38, 48 -> {
@@ -600,8 +611,8 @@ class AnsiTerminalBuffer(
         bracketedPasteMode = false
         appCursorKeys = false
         cursorVisible = true
-        penFg = DEFAULT_FG
-        penBg = DEFAULT_BG
+        penFg = COLOR_DEFAULT_FG
+        penBg = COLOR_DEFAULT_BG
         penBold = false
         penInverse = false
         penUnderline = false
@@ -652,24 +663,7 @@ class AnsiTerminalBuffer(
         return 1
     }
 
-    private fun ansi16Color(idx: Int): Int = when (idx and 15) {
-        0 -> 0xFF18191D.toInt()
-        1 -> 0xFFF87171.toInt()
-        2 -> 0xFF4ADE80.toInt()
-        3 -> 0xFFFACC15.toInt()
-        4 -> 0xFF60A5FA.toInt()
-        5 -> 0xFFC084FC.toInt()
-        6 -> 0xFF22D3EE.toInt()
-        7 -> 0xFFE5E7EB.toInt()
-        8 -> 0xFF6B7280.toInt()
-        9 -> 0xFFFCA5A5.toInt()
-        10 -> 0xFF86EFAC.toInt()
-        11 -> 0xFFFDE047.toInt()
-        12 -> 0xFF93C5FD.toInt()
-        13 -> 0xFFD8B4FE.toInt()
-        14 -> 0xFF67E8F9.toInt()
-        else -> 0xFFFFFFFF.toInt()
-    }
+    private fun ansi16Color(idx: Int): Int = colorIndexed(idx)
 
     private fun xterm256Color(idx: Int): Int {
         val n = idx.coerceIn(0, 255)

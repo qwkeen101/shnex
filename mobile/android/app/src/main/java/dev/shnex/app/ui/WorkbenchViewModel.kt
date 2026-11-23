@@ -2,6 +2,7 @@ package dev.shnex.app.ui
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Typeface
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -23,6 +24,11 @@ import dev.shnex.app.data.TailnetStatusInfo
 import dev.shnex.app.security.KeystoreSecretVault
 import dev.shnex.app.service.ShnexRelayService
 import dev.shnex.app.terminal.AnsiTerminalBuffer
+import dev.shnex.app.terminal.TerminalAppearance
+import dev.shnex.app.terminal.TerminalAppearanceStore
+import dev.shnex.app.terminal.TerminalColorScheme
+import dev.shnex.app.terminal.TerminalColorSchemes
+import dev.shnex.app.terminal.TerminalFonts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -68,6 +74,23 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
     var currentNav by mutableStateOf(BottomNavTab.HOSTS)
     var privacyMaskIp by mutableStateOf(prefs.getBoolean("privacy_mask_ip", true))
         private set
+
+    // Terminal appearance, shared by every open session and the settings preview
+    private val appearanceStore = TerminalAppearanceStore(prefs)
+    var appearance by mutableStateOf(appearanceStore.load())
+        private set
+
+    val terminalScheme: TerminalColorScheme
+        get() = TerminalColorSchemes.byId(appearance.schemeId)
+
+    fun terminalTypeface(): Typeface = TerminalFonts.typeface(getApplication<Application>(), appearance.font)
+
+    fun updateAppearance(transform: (TerminalAppearance) -> TerminalAppearance) {
+        val next = transform(appearance).normalized()
+        if (next == appearance) return
+        appearance = next
+        appearanceStore.save(next)
+    }
 
     val hosts = mutableStateListOf<HostItem>()
     val latencies = mutableStateMapOf<String, Long>()

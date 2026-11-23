@@ -584,11 +584,141 @@ internal class TerminalImeBridgeView(context: Context) : View(context) {
     }
 }
 
+class TerminalMetrics(
+    val cellW: Float,
+    val cellH: Float,
+    val baselineOffset: Float,
+    val pad: Float
+)
+
+/** Applies [typeface] and [fontPx] to [textPaint] and returns the monospace grid metrics. */
+fun measureTerminalGrid(
+    textPaint: Paint,
+    typeface: Typeface,
+    fontPx: Float,
+    lineHeightScale: Float,
+    pad: Float
+): TerminalMetrics {
+    textPaint.typeface = typeface
+    textPaint.textSize = fontPx
+    val cellW = max(6f, textPaint.measureText("M"))
+    val fm = textPaint.fontMetrics
+    val glyphH = fm.descent - fm.ascent
+    val cellH = max(12f, (glyphH + fm.leading) * lineHeightScale)
+    val baselineOffset = -fm.ascent + (cellH - glyphH) * 0.5f
+    return TerminalMetrics(cellW, cellH, baselineOffset, pad)
+}
+
+private fun isLigatureRunChar(cell: TermCell): Boolean {
+    if (cell.width != 1 || cell.text.length != 1) return false
+    val ch = cell.text[0]
+    return ch in '!'..'~'
+}
+
+/**
+ * Draws a terminal snapshot onto a native canvas. Shared by the live terminal and the
+ * appearance preview so both always render identically.
+ *
+ * Backgrounds are painted first for the whole row, then text. Consecutive cells holding
+ * printable single-width ASCII with identical style are drawn with one drawText call so
+ * fonts with programming ligatures (Maple Mono) can join them; ligature glyphs keep each
+ * character's advance width, so the run stays aligned to the cell grid.
+ */
+fun drawTerminalGrid(
+    nc: android.graphics.Canvas,
+    snap: TerminalSnapshot,
+    m: TerminalMetrics,
+    textPaint: Paint,
+    bgPaint: Paint,
+    scheme: TerminalColorScheme,
+    cursorStyle: CursorStyle,
+    showCursor: Boolean,
+    cursorThickness: Float
+) {
+    val run = StringBuilder()
+    for (r in 0 until snap.rows) {
+        val rowCells = snap.lines.getOrNull(r) ?: continue
+        val limit = min(snap.cols, rowCells.size)
+        val topY = m.pad + r * m.cellH
+        val baseY = topY + m.baselineOffset
+
+        // Pass 1: cell backgrounds
+        for (c in 0 until limit) {
+            val cell = rowCells[c]
+            if (cell.width == 0) continue
+            if (!cell.inverse && cell.bg == COLOR_DEFAULT_BG) continue
+            val effBg = resolveColor(if (cell.inverse) cell.fg else cell.bg, scheme)
+            val leftX = m.pad + c * m.cellW
+            val spanW = m.cellW * cell.width.coerceAtLeast(1)
+            bgPaint.color = effBg
+            nc.drawRect(leftX, topY, leftX + spanW + 0.6f, topY + m.cellH + 0.6f, bgPaint)
+        }
+
+        // Pass 2: text, merging same-style ASCII runs for ligatures
+        var c = 0
+        while (c < limit) {
+            val cell = rowCells[c]
+            if (cell.width == 0 || cell.text.isEmpty() || cell.text == " ") {
+                c++
+                continue
+            }
+            val effFg = resolveColor(if (cell.inverse) cell.bg else cell.fg, scheme)
+            textPaint.color = effFg
+            textPaint.isFakeBoldText = cell.bold
+            textPaint.isUnderlineText = cell.underline
+            val leftX = m.pad + c * m.cellW
+
+            if (isLigatureRunChar(cell)) {
+                run.setLength(0)
+                run.append(cell.text)
+                var e = c + 1
+                while (e < limit) {
+                    val n = rowCells[e]
+                    if (!isLigatureRunChar(n) || n.bold != cell.bold || n.underline != cell.underline ||
+                        n.inverse != cell.inverse || n.fg != cell.fg || n.bg != cell.bg
+                    ) break
+                    run.append(n.text)
+                    e++
+                }
+                nc.drawText(run, 0, run.length, leftX, baseY, textPaint)
+                c = e
+            } else {
+                nc.drawText(cell.text, leftX, baseY, textPaint)
+                c++
+            }
+        }
+    }
+    textPaint.isFakeBoldText = false
+    textPaint.isUnderlineText = false
+
+    if (showCursor && snap.cursorVisible) {
+        val cx = m.pad + snap.cursorX * m.cellW
+        val cy = m.pad + snap.cursorY * m.cellH
+        when (cursorStyle) {
+            CursorStyle.BLOCK -> {
+                bgPaint.color = (scheme.cursor and 0x00FFFFFF) or (0x99 shl 24)
+                nc.drawRect(cx, cy, cx + m.cellW, cy + m.cellH, bgPaint)
+            }
+            CursorStyle.BAR -> {
+                bgPaint.color = scheme.cursor
+                nc.drawRect(cx, cy, cx + cursorThickness, cy + m.cellH, bgPaint)
+            }
+            CursorStyle.UNDERLINE -> {
+                bgPaint.color = scheme.cursor
+                nc.drawRect(cx, cy + m.cellH - cursorThickness, cx + m.cellW, cy + m.cellH, bgPaint)
+            }
+        }
+    }
+}
+
 @Composable
 fun TerminalCanvasView(
     buffer: AnsiTerminalBuffer,
     renderTick: Long,
-    initialFontSp: Float = 13f,
+    appearance: TerminalAppearance,
+    scheme: TerminalColorScheme,
+    typeface: Typeface,
+    onFontSizeChanged: (Float) -> Unit,
     imeController: TerminalImeController? = null,
     onInterceptCtrlLetter: (ch: Char) -> Boolean = { false },
     onTerminalInput: (text: String, useBracketedPaste: Boolean) -> Unit = { _, _ -> },
@@ -596,7 +726,13 @@ fun TerminalCanvasView(
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
-    var fontSp by remember(initialFontSp) { mutableFloatStateOf(initialFontSp) }
+    // Local copy so pinch-zoom is smooth; persisted once per gesture via onFontSizeChanged.
+    // One stable state object: the long-lived pointerInput coroutine below keeps writing to it.
+    val fontSpState = remember { mutableFloatStateOf(appearance.fontSizeSp) }
+    var fontSp by fontSpState
+    LaunchedEffect(appearance.fontSizeSp) {
+        fontSpState.floatValue = appearance.fontSizeSp
+    }
     var scrollOffset by remember { mutableIntStateOf(0) }
     var scrollFracPx by remember { mutableFloatStateOf(0f) }
     var canvasSize by remember { mutableIntStateOf(0) }
@@ -605,26 +741,25 @@ fun TerminalCanvasView(
 
     val latestInputCb by rememberUpdatedState(onTerminalInput)
     val latestCtrlCb by rememberUpdatedState(onInterceptCtrlLetter)
+    val latestFontCb by rememberUpdatedState(onFontSizeChanged)
     val latestBuffer by rememberUpdatedState(buffer)
     val internalController = imeController ?: rememberTerminalImeController()
 
     val textPaint = remember {
-        Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-            typeface = Typeface.MONOSPACE
-        }
+        Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG)
     }
     val bgPaint = remember { Paint() }
 
     val fontPx = with(density) { fontSp.sp.toPx() }
-    textPaint.textSize = fontPx
-    val cellW = max(6f, textPaint.measureText("M"))
-    val fm = textPaint.fontMetrics
-    val cellH = max(12f, (fm.descent - fm.ascent + fm.leading) * 1.12f)
-    val baselineOffset = -fm.ascent + (cellH - (fm.descent - fm.ascent)) * 0.5f
+    val pad = 6f * density.density
+    val metrics = measureTerminalGrid(textPaint, typeface, fontPx, appearance.lineHeightScale, pad)
+    val cellW = metrics.cellW
+    val cellH = metrics.cellH
+    val latestCellH by rememberUpdatedState(cellH)
 
-    LaunchedEffect(sizePair, fontSp) {
+    LaunchedEffect(sizePair, fontSp, appearance.lineHeightScale, typeface) {
         if (sizePair.width > 40 && sizePair.height > 40) {
-            val padPx = with(density) { 12f * this.density }
+            val padPx = 2f * pad
             val cols = max(24, floor((sizePair.width - padPx) / cellW).toInt())
             val rows = max(8, floor((sizePair.height - padPx) / cellH).toInt())
             buffer.resize(cols, rows)
@@ -638,11 +773,11 @@ fun TerminalCanvasView(
         }
     }
 
-    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText) {
+    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText, appearance.lineHeightScale, typeface) {
         buffer.snapshot(scrollOffset)
     }
 
-    Box(modifier = modifier.fillMaxSize().background(Color(0xFF121316))) {
+    Box(modifier = modifier.fillMaxSize().background(Color(scheme.bg))) {
         // Hidden 1dp native Android IME receiver view
         AndroidView(
             factory = { ctx ->
@@ -674,13 +809,14 @@ fun TerminalCanvasView(
                     sizePair = sz
                     canvasSize = sz.width xor sz.height
                 }
-                .pointerInput(cellH) {
+                .pointerInput(Unit) {
                     val slop = viewConfiguration.touchSlop
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val startPos: Offset = down.position
                         var movedBeyondSlop = false
                         var maxPointers = 1
+                        var zoomed = false
 
                         do {
                             val event = awaitPointerEvent()
@@ -689,7 +825,11 @@ fun TerminalCanvasView(
                                 maxPointers = max(maxPointers, activeCount)
                                 val zoom = event.calculateZoom()
                                 if (zoom != 1f) {
-                                    fontSp = (fontSp * zoom).coerceIn(9.5f, 22f)
+                                    fontSp = (fontSp * zoom).coerceIn(
+                                        TerminalAppearance.FONT_SIZE_MIN,
+                                        TerminalAppearance.FONT_SIZE_MAX
+                                    )
+                                    zoomed = true
                                     event.changes.forEach { it.consume() }
                                 }
                             } else if (activeCount == 1 && maxPointers == 1) {
@@ -704,9 +844,10 @@ fun TerminalCanvasView(
                                     val pan = event.calculatePan()
                                     if (pan.y != 0f) {
                                         scrollFracPx += pan.y
-                                        val deltaLines = (scrollFracPx / cellH).roundToInt()
+                                        val rowH = latestCellH
+                                        val deltaLines = (scrollFracPx / rowH).roundToInt()
                                         if (deltaLines != 0) {
-                                            scrollFracPx -= deltaLines * cellH
+                                            scrollFracPx -= deltaLines * rowH
                                             val curScrollMax = latestBuffer.snapshot(0).scrollbackSize
                                             scrollOffset = (scrollOffset + deltaLines).coerceIn(0, curScrollMax)
                                         }
@@ -716,6 +857,11 @@ fun TerminalCanvasView(
                             }
                         } while (event.changes.any { it.pressed })
 
+                        if (zoomed) {
+                            // Persist once per pinch gesture (0.5sp steps), survives tab switches and restarts.
+                            latestFontCb((fontSp * 2f).roundToInt() / 2f)
+                        }
+
                         // Single finger clean tap anywhere on terminal -> snap to bottom & open soft keyboard!
                         if (!movedBeyondSlop && maxPointers == 1) {
                             scrollOffset = 0
@@ -724,59 +870,33 @@ fun TerminalCanvasView(
                     }
                 }
         ) {
-            val pad = 6f * density.density
             val nc = drawContext.canvas.nativeCanvas
+            val composing = composingText.isNotEmpty() && scrollOffset == 0
+            val cursorThickness = 2f * density.density
 
-            for (r in 0 until snap.rows) {
-                val rowCells = snap.lines.getOrNull(r) ?: continue
-                val topY = pad + r * cellH
-                val baseY = topY + baselineOffset
+            drawTerminalGrid(
+                nc = nc,
+                snap = snap,
+                m = metrics,
+                textPaint = textPaint,
+                bgPaint = bgPaint,
+                scheme = scheme,
+                cursorStyle = appearance.cursorStyle,
+                showCursor = !composing && scrollOffset == 0,
+                cursorThickness = cursorThickness
+            )
 
-                var c = 0
-                while (c < snap.cols && c < rowCells.size) {
-                    val cell = rowCells[c]
-                    if (cell.width == 0) {
-                        c++
-                        continue
-                    }
-                    val spanW = cellW * cell.width.coerceAtLeast(1)
-                    val leftX = pad + c * cellW
-
-                    val effFg = if (cell.inverse) cell.bg else cell.fg
-                    val effBg = if (cell.inverse) cell.fg else cell.bg
-
-                    if (effBg != DEFAULT_BG) {
-                        bgPaint.color = effBg
-                        nc.drawRect(leftX, topY, leftX + spanW + 0.6f, topY + cellH + 0.6f, bgPaint)
-                    }
-
-                    if (cell.text.isNotEmpty() && cell.text != " ") {
-                        textPaint.color = effFg
-                        textPaint.isFakeBoldText = cell.bold
-                        textPaint.isUnderlineText = cell.underline
-                        nc.drawText(cell.text, leftX, baseY, textPaint)
-                    }
-                    c++
-                }
-            }
-
-            val cx = pad + snap.cursorX * cellW
-            val cy = pad + snap.cursorY * cellH
-
-            if (composingText.isNotEmpty() && scrollOffset == 0) {
+            if (composing) {
                 // Draw inline IME pre-edit text right at the live cursor cell!
-                textPaint.isFakeBoldText = false
-                textPaint.isUnderlineText = false
+                val cx = pad + snap.cursorX * cellW
+                val cy = pad + snap.cursorY * cellH
                 val compW = max(cellW, textPaint.measureText(composingText) + 6f)
-                bgPaint.color = 0xEE1E2433.toInt()
+                bgPaint.color = scheme.bg
                 nc.drawRect(cx, cy, cx + compW, cy + cellH, bgPaint)
-                bgPaint.color = 0xFF60A5FA.toInt()
-                nc.drawRect(cx, cy + cellH - 2.5f * density.density, cx + compW, cy + cellH, bgPaint)
-                textPaint.color = 0xFFF9FAFB.toInt()
-                nc.drawText(composingText, cx + 3f, cy + baselineOffset, textPaint)
-            } else if (snap.cursorVisible && scrollOffset == 0) {
-                bgPaint.color = 0x9960A5FA.toInt()
-                nc.drawRect(cx, cy, cx + cellW, cy + cellH, bgPaint)
+                bgPaint.color = scheme.cursor
+                nc.drawRect(cx, cy + cellH - cursorThickness, cx + compW, cy + cellH, bgPaint)
+                textPaint.color = scheme.fg
+                nc.drawText(composingText, cx + 3f, cy + metrics.baselineOffset, textPaint)
             }
         }
     }

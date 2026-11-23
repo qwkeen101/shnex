@@ -42,6 +42,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
@@ -102,6 +103,7 @@ import dev.shnex.app.data.HostItem
 import dev.shnex.app.service.ShnexRelayService
 import dev.shnex.app.terminal.TerminalCanvasView
 import dev.shnex.app.terminal.rememberTerminalImeController
+import dev.shnex.app.ui.AppearanceScreen
 import dev.shnex.app.ui.BottomNavTab
 import dev.shnex.app.ui.NativeMarkdownDocumentView
 import dev.shnex.app.ui.WorkbenchViewModel
@@ -846,6 +848,10 @@ private fun SessionsScreen(
             TerminalCanvasView(
                 buffer = active.buffer,
                 renderTick = active.renderTick,
+                appearance = vm.appearance,
+                scheme = vm.terminalScheme,
+                typeface = vm.terminalTypeface(),
+                onFontSizeChanged = { sp -> vm.updateAppearance { it.copy(fontSizeSp = sp) } },
                 imeController = imeController,
                 onInterceptCtrlLetter = { ch ->
                     val low = ch.lowercaseChar()
@@ -1000,6 +1006,12 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
     var controlUrl by remember { mutableStateOf("") }
     var authKey by remember { mutableStateOf("") }
     var showTsDialog by remember { mutableStateOf(false) }
+    var showAppearance by remember { mutableStateOf(false) }
+
+    if (showAppearance) {
+        AppearanceScreen(vm = vm, onBack = { showAppearance = false })
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -1018,6 +1030,32 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                 .border(1.dp, Color(0xFF2C2F3A), RoundedCornerShape(18.dp))
         ) {
             Column {
+                // 0. Terminal appearance (font, color scheme, size, cursor)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showAppearance = true }
+                        .padding(15.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("终端外观", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            text = "${vm.appearance.font.label} · ${vm.terminalScheme.name}",
+                            color = Color(0xFF8B909A),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = Color(0xFF8B909A),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                HorizontalDivider(color = Color(0xFF262934))
+
                 // 1. Tailscale / Headscale tsnet
                 Row(
                     modifier = Modifier

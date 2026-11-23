@@ -73,9 +73,10 @@ data class TerminalAppearance(
 `TermCell.fg/bg` 存「语义码」而非 ARGB，绘制期再按当前配色解析：
 
 - `COLOR_DEFAULT_FG = 0x00000000`、`COLOR_DEFAULT_BG = 0x00000001`
-- `colorIndexed(idx) = 0x01000000 or (idx and 0xFF)`：`0..15` 查 `scheme.ansi16`，`16..255` 走 xterm-256 色立方 / 灰阶（`38;5;n` 的 `n < 16` 也查配色）
+- `colorIndexed(idx) = 0x01000000 or (idx and 15)`：ANSI 16 色（含 `38;5;n` / `48;5;n` 的 `n < 16`）在绘制期查 `scheme.ansi16`
+- xterm-256 的 `16..255`（色立方 / 灰阶）与配色无关，仍在解析期算成 `0xFFRRGGBB`
 - 24-bit 真彩照旧存 `0xFFRRGGBB`（alpha 恒为 `0xFF`，与上面两类高位天然不冲突）
-- 新增 `resolveColor(code: Int, scheme: TerminalColorScheme, isBg: Boolean): Int`
+- 新增 `resolveColor(code: Int, scheme: TerminalColorScheme): Int`
 - 保留现有行为：`SGR 1` 之后的 `30..37` 映射到亮色索引 `+8`；`TermCell.reset(bgColor)` 的背景色擦除（BCE）同样存语义码。
 
 ### 3.4 渲染（改造 `TerminalCanvas.kt`）

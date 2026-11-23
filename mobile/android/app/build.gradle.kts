@@ -46,6 +46,11 @@ android {
         compose = true
     }
 
+    // Bundled terminal font is stored uncompressed so Typeface.createFromAsset can map it directly.
+    androidResources {
+        noCompress += "ttf"
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
