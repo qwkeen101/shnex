@@ -125,9 +125,14 @@ func (e *Engine) Suggest(ctx context.Context, inspector WorkspaceInspector, req 
 
 	// Case 1: Typing the first command word itself (e.g. `gi`, `np`, `./script`)
 	if len(pl.args) == 0 && !pl.hasTrailingSp {
-		if strings.ContainsAny(pl.activeUnquoted, `/\`) || strings.HasPrefix(pl.activeUnquoted, ".") {
+		if isFirstWordFilesystemPath(pl.activeUnquoted) {
 			cands := e.completeFilesystem(ctx, inspector, cwd, pl, false)
 			return buildResponse(pl, cands)
+		}
+		// A single leading-slash segment (`/`, `/model`, `/help`) is an AI CLI slash
+		// command (Claude Code, Codex, Gemini CLI), not a root-directory path.
+		if strings.HasPrefix(pl.activeUnquoted, "/") {
+			return SuggestResponse{}
 		}
 		var cands []Candidate
 		prefixLower := strings.ToLower(pl.activeUnquoted)
@@ -179,6 +184,19 @@ func (e *Engine) Suggest(ctx context.Context, inspector WorkspaceInspector, req 
 		cands = cands[:24]
 	}
 	return buildResponse(pl, cands)
+}
+
+// isFirstWordFilesystemPath reports whether a first-word token should be completed as a
+// filesystem path: `./script`, `../run`, `scripts/run.sh`, `C:\tools`, `/usr/bin/`.
+// A lone leading-slash segment such as `/model` is treated as a slash command instead.
+func isFirstWordFilesystemPath(tok string) bool {
+	if strings.HasPrefix(tok, ".") || strings.Contains(tok, `\`) {
+		return true
+	}
+	if !strings.Contains(tok, "/") {
+		return false
+	}
+	return !strings.HasPrefix(tok, "/") || strings.Count(tok, "/") >= 2
 }
 
 func buildResponse(pl parsedLine, cands []Candidate) SuggestResponse {

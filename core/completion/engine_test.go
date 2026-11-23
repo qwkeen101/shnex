@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -176,5 +177,78 @@ func TestCdDirectoryCompletionWithDotDirsAndNormalDirs(t *testing.T) {
 	cdEmpty := eng.Suggest(ctx, freshInsp, SuggestRequest{Line: "cd ", Cwd: emptyLeaf})
 	if len(cdEmpty.Candidates) != 1 || cdEmpty.Candidates[0].Label != "../" {
 		t.Fatalf("expected ../ fallback in empty leaf directory, got %+v", cdEmpty.Candidates)
+	}
+}
+
+func TestIsFirstWordFilesystemPath(t *testing.T) {
+	cases := map[string]bool{
+		"/":              false,
+		"/model":         false,
+		"/help":          false,
+		"/m":             false,
+		"git":            false,
+		"./":             true,
+		"./script":       true,
+		"../run":         true,
+		".venv/bin/act":  true,
+		"scripts/run.sh": true,
+		"~/bin/tool":     true,
+		"/usr/":          true,
+		"/usr/bin/py":    true,
+		`C:\tools`:       true,
+	}
+	for tok, want := range cases {
+		if got := isFirstWordFilesystemPath(tok); got != want {
+			t.Errorf("isFirstWordFilesystemPath(%q) = %v, want %v", tok, got, want)
+		}
+	}
+}
+
+func TestFirstWordSlashCommandsSkipRootPathCompletion(t *testing.T) {
+	ctx := context.Background()
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	insp := NewLocalInspector(ws)
+	eng := NewEngine(nil)
+
+	// AI CLI slash commands typed as the first word must never fall into root-directory completion.
+	for _, line := range []string{"/", "/clear", "/compact", "/help", "/model", "/m", "/resume"} {
+		resp := eng.Suggest(ctx, insp, SuggestRequest{Line: line, Cwd: ws})
+		if len(resp.Candidates) != 0 {
+			t.Fatalf("expected no candidates for slash command %q, got %+v", line, resp.Candidates)
+		}
+	}
+
+	hasSrc := func(cands []Candidate) bool {
+		for _, c := range cands {
+			if strings.Contains(c.Label, "src") {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Relative first-word paths keep completing.
+	if resp := eng.Suggest(ctx, insp, SuggestRequest{Line: "./", Cwd: ws}); !hasSrc(resp.Candidates) {
+		t.Fatalf("expected ./ to complete src/, got %+v", resp.Candidates)
+	}
+
+	// Forward slashes keep the absolute temp path free of shell escapes on Windows;
+	// a temp dir with spaces (e.g. a Windows user name) would split into several words.
+	absPrefix := filepath.ToSlash(ws) + "/"
+	if strings.Contains(absPrefix, " ") {
+		return
+	}
+
+	// Multi-segment absolute first-word paths keep completing.
+	if resp := eng.Suggest(ctx, insp, SuggestRequest{Line: absPrefix, Cwd: ws}); !hasSrc(resp.Candidates) {
+		t.Fatalf("expected %q to complete src/, got %+v", absPrefix, resp.Candidates)
+	}
+
+	// Argument-position paths (`cd /...`) are unaffected by the first-word rule.
+	if resp := eng.Suggest(ctx, insp, SuggestRequest{Line: "cd " + absPrefix, Cwd: ws}); !hasSrc(resp.Candidates) {
+		t.Fatalf("expected cd %q to complete src/, got %+v", absPrefix, resp.Candidates)
 	}
 }
