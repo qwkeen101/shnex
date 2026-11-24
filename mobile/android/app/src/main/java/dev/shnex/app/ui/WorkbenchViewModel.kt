@@ -28,7 +28,10 @@ import dev.shnex.app.terminal.TerminalAppearance
 import dev.shnex.app.terminal.TerminalAppearanceStore
 import dev.shnex.app.terminal.TerminalColorScheme
 import dev.shnex.app.terminal.TerminalColorSchemes
-import dev.shnex.app.terminal.TerminalFonts
+import dev.shnex.app.terminal.FontCatalog
+import dev.shnex.app.terminal.FontEntry
+import dev.shnex.app.terminal.TerminalFontPair
+import dev.shnex.app.terminal.TerminalFontStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -83,7 +86,60 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
     val terminalScheme: TerminalColorScheme
         get() = TerminalColorSchemes.byId(appearance.schemeId)
 
-    fun terminalTypeface(): Typeface = TerminalFonts.typeface(getApplication<Application>(), appearance.font)
+    // Terminal fonts: bundled / system fonts plus a small downloadable catalog
+    private val fontStore = TerminalFontStore(app)
+    var installedFontIds by mutableStateOf(scanInstalledFonts())
+        private set
+    /** Fonts currently downloading, id -> progress 0f..1f. */
+    val fontDownloads = mutableStateMapOf<String, Float>()
+    private var fontPair: TerminalFontPair? = null
+
+    private fun scanInstalledFonts(): Set<String> =
+        FontCatalog.all.filter { fontStore.isInstalled(it) }.map { it.id }.toSet()
+
+    /** Typefaces for the current appearance; falls back to built-ins if a chosen font is missing. */
+    fun terminalFonts(): TerminalFontPair {
+        val primary = fontStore.typeface(appearance.primaryFontId)
+            ?: fontStore.typeface(FontCatalog.DEFAULT_PRIMARY)
+            ?: Typeface.MONOSPACE
+        val fallback = fontStore.typeface(appearance.fallbackFontId) ?: Typeface.DEFAULT
+        val cur = fontPair
+        if (cur != null && cur.primary === primary && cur.fallback === fallback) return cur
+        return TerminalFontPair(primary, fallback).also { fontPair = it }
+    }
+
+    fun selectPrimaryFont(id: String) = updateAppearance { it.copy(primaryFontId = id) }
+
+    fun selectFallbackFont(id: String) = updateAppearance { it.copy(fallbackFontId = id) }
+
+    fun downloadFont(entry: FontEntry) {
+        if (!entry.downloadable || fontDownloads.containsKey(entry.id)) return
+        fontDownloads[entry.id] = 0f
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    fontStore.install(entry) { p -> fontDownloads[entry.id] = p }
+                }
+            }
+            fontDownloads.remove(entry.id)
+            installedFontIds = scanInstalledFonts()
+            result
+                .onSuccess { showToast("${entry.name} 已下载") }
+                .onFailure { showToast("下载失败：${it.message ?: it.javaClass.simpleName}") }
+        }
+    }
+
+    fun deleteFont(entry: FontEntry) {
+        if (!entry.downloadable) return
+        fontStore.delete(entry)
+        installedFontIds = scanInstalledFonts()
+        updateAppearance {
+            it.copy(
+                primaryFontId = if (it.primaryFontId == entry.id) FontCatalog.DEFAULT_PRIMARY else it.primaryFontId,
+                fallbackFontId = if (it.fallbackFontId == entry.id) FontCatalog.DEFAULT_FALLBACK else it.fallbackFontId
+            )
+        }
+    }
 
     fun updateAppearance(transform: (TerminalAppearance) -> TerminalAppearance) {
         val next = transform(appearance).normalized()
@@ -132,6 +188,11 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refreshSecretCount()
+        viewModelScope.launch(Dispatchers.IO) {
+            // Warm the font cache off the main thread before the first terminal frame.
+            fontStore.typeface(appearance.primaryFontId)
+            fontStore.typeface(appearance.fallbackFontId)
+        }
         viewModelScope.launch {
             ShnexRelayService.bootErrorFlow.collect { err ->
                 bootError = err

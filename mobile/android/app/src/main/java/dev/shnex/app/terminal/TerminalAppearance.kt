@@ -1,13 +1,6 @@
 package dev.shnex.app.terminal
 
-import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.Typeface
-
-enum class TerminalFont(val label: String) {
-    MAPLE_MONO("Maple Mono"),
-    SYSTEM_MONO("系统等宽")
-}
 
 enum class CursorStyle(val label: String) {
     BLOCK("方块"),
@@ -25,13 +18,18 @@ class TerminalColorScheme(
 )
 
 data class TerminalAppearance(
-    val font: TerminalFont = TerminalFont.MAPLE_MONO,
+    /** Font for single-width cells; glyphs it lacks (and all CJK) use [fallbackFontId]. */
+    val primaryFontId: String = FontCatalog.DEFAULT_PRIMARY,
+    /** The 中文 / 回退字体 setting. */
+    val fallbackFontId: String = FontCatalog.DEFAULT_FALLBACK,
     val schemeId: String = TerminalColorSchemes.DEFAULT_ID,
     val fontSizeSp: Float = 13f,
     val lineHeightScale: Float = 1.12f,
     val cursorStyle: CursorStyle = CursorStyle.BLOCK
 ) {
     fun normalized(): TerminalAppearance = copy(
+        primaryFontId = FontCatalog.byId(primaryFontId)?.id ?: FontCatalog.DEFAULT_PRIMARY,
+        fallbackFontId = FontCatalog.byId(fallbackFontId)?.id ?: FontCatalog.DEFAULT_FALLBACK,
         schemeId = TerminalColorSchemes.byId(schemeId).id,
         fontSizeSp = fontSizeSp.coerceIn(FONT_SIZE_MIN, FONT_SIZE_MAX),
         lineHeightScale = lineHeightScale.coerceIn(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX)
@@ -103,26 +101,12 @@ fun resolveColor(code: Int, scheme: TerminalColorScheme): Int = when {
     else -> code
 }
 
-object TerminalFonts {
-    private const val MAPLE_ASSET = "fonts/MapleMono-NF-Regular.ttf"
-
-    @Volatile
-    private var maple: Typeface? = null
-
-    fun typeface(context: Context, font: TerminalFont): Typeface = when (font) {
-        TerminalFont.SYSTEM_MONO -> Typeface.MONOSPACE
-        TerminalFont.MAPLE_MONO -> maple ?: synchronized(this) {
-            maple ?: (runCatching { Typeface.createFromAsset(context.assets, MAPLE_ASSET) }.getOrNull()
-                ?: Typeface.MONOSPACE).also { maple = it }
-        }
-    }
-}
-
 class TerminalAppearanceStore(private val prefs: SharedPreferences) {
     fun load(): TerminalAppearance {
         val d = TerminalAppearance()
         return TerminalAppearance(
-            font = enumOr(prefs.getString(KEY_FONT, null), d.font),
+            primaryFontId = prefs.getString(KEY_PRIMARY_FONT, null) ?: d.primaryFontId,
+            fallbackFontId = prefs.getString(KEY_FALLBACK_FONT, null) ?: d.fallbackFontId,
             schemeId = prefs.getString(KEY_SCHEME, null) ?: d.schemeId,
             fontSizeSp = prefs.getFloat(KEY_FONT_SIZE, d.fontSizeSp),
             lineHeightScale = prefs.getFloat(KEY_LINE_HEIGHT, d.lineHeightScale),
@@ -132,7 +116,8 @@ class TerminalAppearanceStore(private val prefs: SharedPreferences) {
 
     fun save(a: TerminalAppearance) {
         prefs.edit()
-            .putString(KEY_FONT, a.font.name)
+            .putString(KEY_PRIMARY_FONT, a.primaryFontId)
+            .putString(KEY_FALLBACK_FONT, a.fallbackFontId)
             .putString(KEY_SCHEME, a.schemeId)
             .putFloat(KEY_FONT_SIZE, a.fontSizeSp)
             .putFloat(KEY_LINE_HEIGHT, a.lineHeightScale)
@@ -144,7 +129,8 @@ class TerminalAppearanceStore(private val prefs: SharedPreferences) {
         enumValues<E>().firstOrNull { it.name == name } ?: fallback
 
     private companion object {
-        const val KEY_FONT = "term_font"
+        const val KEY_PRIMARY_FONT = "term_primary_font"
+        const val KEY_FALLBACK_FONT = "term_fallback_font"
         const val KEY_SCHEME = "term_scheme"
         const val KEY_FONT_SIZE = "term_font_size_sp"
         const val KEY_LINE_HEIGHT = "term_line_height"

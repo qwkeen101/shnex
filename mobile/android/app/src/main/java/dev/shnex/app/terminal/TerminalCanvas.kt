@@ -619,6 +619,9 @@ private fun isLigatureRunChar(cell: TermCell): Boolean {
  * Draws a terminal snapshot onto a native canvas. Shared by the live terminal and the
  * appearance preview so both always render identically.
  *
+ * Fonts: see [TerminalFontPair]. Double-width (CJK) cells are drawn with the fallback font,
+ * centered in their two-cell slot when its glyph is narrower than the slot.
+ *
  * Backgrounds are painted first for the whole row, then text. Consecutive cells holding
  * printable single-width ASCII with identical style are drawn with one drawText call so
  * fonts with programming ligatures (Maple Mono) can join them; ligature glyphs keep each
@@ -630,6 +633,7 @@ fun drawTerminalGrid(
     m: TerminalMetrics,
     textPaint: Paint,
     bgPaint: Paint,
+    fonts: TerminalFontPair,
     scheme: TerminalColorScheme,
     cursorStyle: CursorStyle,
     showCursor: Boolean,
@@ -682,12 +686,28 @@ fun drawTerminalGrid(
                 }
                 nc.drawText(run, 0, run.length, leftX, baseY, textPaint)
                 c = e
+            } else if (cell.width == 2) {
+                textPaint.typeface = fonts.fallback
+                var x = leftX
+                if (fonts.fallback !== fonts.primary) {
+                    val slack = 2f * m.cellW - textPaint.measureText(cell.text)
+                    if (slack > 0f) x += slack * 0.5f
+                }
+                nc.drawText(cell.text, x, baseY, textPaint)
+                textPaint.typeface = fonts.primary
+                c++
+            } else if (!fonts.primaryHasGlyph(cell.text)) {
+                textPaint.typeface = fonts.fallback
+                nc.drawText(cell.text, leftX, baseY, textPaint)
+                textPaint.typeface = fonts.primary
+                c++
             } else {
                 nc.drawText(cell.text, leftX, baseY, textPaint)
                 c++
             }
         }
     }
+    textPaint.typeface = fonts.primary
     textPaint.isFakeBoldText = false
     textPaint.isUnderlineText = false
 
@@ -717,7 +737,7 @@ fun TerminalCanvasView(
     renderTick: Long,
     appearance: TerminalAppearance,
     scheme: TerminalColorScheme,
-    typeface: Typeface,
+    fonts: TerminalFontPair,
     onFontSizeChanged: (Float) -> Unit,
     imeController: TerminalImeController? = null,
     onInterceptCtrlLetter: (ch: Char) -> Boolean = { false },
@@ -752,12 +772,12 @@ fun TerminalCanvasView(
 
     val fontPx = with(density) { fontSp.sp.toPx() }
     val pad = 6f * density.density
-    val metrics = measureTerminalGrid(textPaint, typeface, fontPx, appearance.lineHeightScale, pad)
+    val metrics = measureTerminalGrid(textPaint, fonts.primary, fontPx, appearance.lineHeightScale, pad)
     val cellW = metrics.cellW
     val cellH = metrics.cellH
     val latestCellH by rememberUpdatedState(cellH)
 
-    LaunchedEffect(sizePair, fontSp, appearance.lineHeightScale, typeface) {
+    LaunchedEffect(sizePair, fontSp, appearance.lineHeightScale, fonts.primary) {
         if (sizePair.width > 40 && sizePair.height > 40) {
             val padPx = 2f * pad
             val cols = max(24, floor((sizePair.width - padPx) / cellW).toInt())
@@ -773,7 +793,7 @@ fun TerminalCanvasView(
         }
     }
 
-    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText, appearance.lineHeightScale, typeface) {
+    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText, appearance.lineHeightScale, fonts.primary) {
         buffer.snapshot(scrollOffset)
     }
 
@@ -880,6 +900,7 @@ fun TerminalCanvasView(
                 m = metrics,
                 textPaint = textPaint,
                 bgPaint = bgPaint,
+                fonts = fonts,
                 scheme = scheme,
                 cursorStyle = appearance.cursorStyle,
                 showCursor = !composing && scrollOffset == 0,

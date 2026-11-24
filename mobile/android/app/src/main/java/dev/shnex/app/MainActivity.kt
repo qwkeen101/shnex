@@ -101,6 +101,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.shnex.app.data.HostItem
 import dev.shnex.app.service.ShnexRelayService
+import dev.shnex.app.terminal.FontCatalog
 import dev.shnex.app.terminal.TerminalCanvasView
 import dev.shnex.app.terminal.rememberTerminalImeController
 import dev.shnex.app.ui.AppearanceScreen
@@ -850,7 +851,7 @@ private fun SessionsScreen(
                 renderTick = active.renderTick,
                 appearance = vm.appearance,
                 scheme = vm.terminalScheme,
-                typeface = vm.terminalTypeface(),
+                fonts = vm.terminalFonts(),
                 onFontSizeChanged = { sp -> vm.updateAppearance { it.copy(fontSizeSp = sp) } },
                 imeController = imeController,
                 onInterceptCtrlLetter = { ch ->
@@ -1042,7 +1043,7 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("终端外观", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                         Text(
-                            text = "${vm.appearance.font.label} · ${vm.terminalScheme.name}",
+                            text = "${FontCatalog.byId(vm.appearance.primaryFontId)?.name.orEmpty()} · ${vm.terminalScheme.name}",
                             color = Color(0xFF8B909A),
                             fontSize = 12.sp
                         )

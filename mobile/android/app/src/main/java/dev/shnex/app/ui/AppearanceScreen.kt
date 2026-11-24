@@ -1,7 +1,6 @@
 package dev.shnex.app.ui
 
 import android.graphics.Paint
-import android.graphics.Typeface
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,7 +24,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -35,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -53,7 +57,8 @@ import dev.shnex.app.terminal.CursorStyle
 import dev.shnex.app.terminal.TerminalAppearance
 import dev.shnex.app.terminal.TerminalColorScheme
 import dev.shnex.app.terminal.TerminalColorSchemes
-import dev.shnex.app.terminal.TerminalFont
+import dev.shnex.app.terminal.FontCatalog
+import dev.shnex.app.terminal.TerminalFontPair
 import dev.shnex.app.terminal.drawTerminalGrid
 import dev.shnex.app.terminal.measureTerminalGrid
 import kotlin.math.floor
@@ -80,10 +85,15 @@ private val MutedText = Color(0xFF8B909A)
 
 @Composable
 fun AppearanceScreen(vm: WorkbenchViewModel, onBack: () -> Unit) {
+    var showFonts by remember { mutableStateOf(false) }
+    if (showFonts) {
+        FontStoreScreen(vm = vm, onBack = { showFonts = false })
+        return
+    }
     BackHandler(onBack = onBack)
     val a = vm.appearance
     val scheme = vm.terminalScheme
-    val typeface = vm.terminalTypeface()
+    val fonts = vm.terminalFonts()
 
     Column(
         modifier = Modifier
@@ -99,11 +109,15 @@ fun AppearanceScreen(vm: WorkbenchViewModel, onBack: () -> Unit) {
             Text("终端外观", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
         }
 
-        TerminalPreviewCard(a, scheme, typeface)
+        TerminalPreviewCard(a, scheme, fonts)
 
         SettingsGroup("字体") {
-            OptionChips(TerminalFont.entries, a.font, { it.label }) { f ->
-                vm.updateAppearance { it.copy(font = f) }
+            NavRow(Icons.Default.TextFields, "主字体", FontCatalog.byId(a.primaryFontId)?.name.orEmpty()) {
+                showFonts = true
+            }
+            HorizontalDivider(color = Color(0xFF262934))
+            NavRow(Icons.Default.Translate, "中文 / 回退字体", FontCatalog.byId(a.fallbackFontId)?.name.orEmpty()) {
+                showFonts = true
             }
         }
 
@@ -144,13 +158,13 @@ fun AppearanceScreen(vm: WorkbenchViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun TerminalPreviewCard(a: TerminalAppearance, scheme: TerminalColorScheme, typeface: Typeface) {
+private fun TerminalPreviewCard(a: TerminalAppearance, scheme: TerminalColorScheme, fonts: TerminalFontPair) {
     val density = LocalDensity.current
     val textPaint = remember { Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG) }
     val bgPaint = remember { Paint() }
     val pad = 10f * density.density
     val fontPx = with(density) { a.fontSizeSp.sp.toPx() }
-    val metrics = measureTerminalGrid(textPaint, typeface, fontPx, a.lineHeightScale, pad)
+    val metrics = measureTerminalGrid(textPaint, fonts.primary, fontPx, a.lineHeightScale, pad)
 
     var widthPx by remember { mutableIntStateOf(0) }
     val cols = if (widthPx > 0) floor((widthPx - 2f * pad) / metrics.cellW).toInt().coerceAtLeast(20) else 40
@@ -175,6 +189,7 @@ private fun TerminalPreviewCard(a: TerminalAppearance, scheme: TerminalColorSche
             m = metrics,
             textPaint = textPaint,
             bgPaint = bgPaint,
+            fonts = fonts,
             scheme = scheme,
             cursorStyle = a.cursorStyle,
             showCursor = true,
@@ -196,6 +211,28 @@ private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> 
             Text(title, color = MutedText, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             content()
         }
+    }
+}
+
+@Composable
+private fun NavRow(icon: ImageVector, title: String, value: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = MutedText, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(14.dp))
+        Text(title, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Text(value, color = Color(0xFFB4B8C0), fontSize = 13.sp)
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MutedText,
+            modifier = Modifier.size(20.dp)
+        )
     }
 }
 
