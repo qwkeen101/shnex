@@ -619,8 +619,8 @@ private fun isLigatureRunChar(cell: TermCell): Boolean {
  * Draws a terminal snapshot onto a native canvas. Shared by the live terminal and the
  * appearance preview so both always render identically.
  *
- * Fonts: see [TerminalFontPair]. Double-width (CJK) cells are drawn with the fallback font,
- * centered in their two-cell slot when its glyph is narrower than the slot.
+ * Fonts: see [TerminalFontPair]. Double-width cells not drawn with the primary font are
+ * centered in their two-cell slot when the glyph is narrower than the slot.
  *
  * Backgrounds are painted first for the whole row, then text. Consecutive cells holding
  * printable single-width ASCII with identical style are drawn with one drawText call so
@@ -687,22 +687,21 @@ fun drawTerminalGrid(
                 nc.drawText(run, 0, run.length, leftX, baseY, textPaint)
                 c = e
             } else if (cell.width == 2) {
-                textPaint.typeface = fonts.fallback
+                val tf = fonts.wideTypefaceFor(cell.text)
+                textPaint.typeface = tf
                 var x = leftX
-                if (fonts.fallback !== fonts.primary) {
+                if (tf !== fonts.primary) {
                     val slack = 2f * m.cellW - textPaint.measureText(cell.text)
                     if (slack > 0f) x += slack * 0.5f
                 }
                 nc.drawText(cell.text, x, baseY, textPaint)
                 textPaint.typeface = fonts.primary
                 c++
-            } else if (!fonts.primaryHasGlyph(cell.text)) {
-                textPaint.typeface = fonts.fallback
-                nc.drawText(cell.text, leftX, baseY, textPaint)
-                textPaint.typeface = fonts.primary
-                c++
             } else {
+                val tf = fonts.typefaceFor(cell.text)
+                if (tf !== fonts.primary) textPaint.typeface = tf
                 nc.drawText(cell.text, leftX, baseY, textPaint)
+                if (tf !== fonts.primary) textPaint.typeface = fonts.primary
                 c++
             }
         }
@@ -911,6 +910,8 @@ fun TerminalCanvasView(
                 // Draw inline IME pre-edit text right at the live cursor cell!
                 val cx = pad + snap.cursorX * cellW
                 val cy = pad + snap.cursorY * cellH
+                // Pre-edit text mixes pinyin and CJK; the system font chain always has those glyphs.
+                textPaint.typeface = Typeface.DEFAULT
                 val compW = max(cellW, textPaint.measureText(composingText) + 6f)
                 bgPaint.color = scheme.bg
                 nc.drawRect(cx, cy, cx + compW, cy + cellH, bgPaint)
@@ -918,6 +919,7 @@ fun TerminalCanvasView(
                 nc.drawRect(cx, cy + cellH - cursorThickness, cx + compW, cy + cellH, bgPaint)
                 textPaint.color = scheme.fg
                 nc.drawText(composingText, cx + 3f, cy + metrics.baselineOffset, textPaint)
+                textPaint.typeface = fonts.primary
             }
         }
     }

@@ -132,21 +132,44 @@ object FontCatalog {
 }
 
 /**
- * The two typefaces a terminal draws with. Double-width (CJK) cells always use [fallback];
- * single-width cells use [primary] unless it lacks the glyph (e.g. Nerd Font icons in a
- * plain Latin font). Glyph lookups are cached; drawing happens on the main thread only.
+ * The two typefaces a terminal draws with, plus the system font chain as a last resort.
+ *
+ * Fonts loaded from a file or asset do not fall back to system fonts on their own, so a
+ * glyph neither chosen font has (e.g. U+23F5 "⏵" in Claude Code's status line, emoji) would
+ * render as a missing-glyph box. Lookup order:
+ *  - single-width cells: [primary] → [fallback] → system
+ *  - double-width (CJK) cells: [fallback] → [primary] → system
+ * Results are cached per cell text; drawing happens on the main thread only.
  */
 class TerminalFontPair(val primary: Typeface, val fallback: Typeface) {
-    private val probe = Paint().apply { typeface = primary }
-    private val glyphCache = HashMap<String, Boolean>()
+    private val primaryProbe = Paint().apply { typeface = primary }
+    private val fallbackProbe = Paint().apply { typeface = fallback }
+    private val narrowCache = HashMap<String, Typeface>()
+    private val wideCache = HashMap<String, Typeface>()
 
-    fun primaryHasGlyph(text: String): Boolean {
-        if (primary === fallback) return true
-        glyphCache[text]?.let { return it }
-        if (glyphCache.size > 4096) glyphCache.clear()
-        val has = probe.hasGlyph(text)
-        glyphCache[text] = has
-        return has
+    fun typefaceFor(text: String): Typeface =
+        lookup(narrowCache, text, primary, primaryProbe, fallback, fallbackProbe)
+
+    fun wideTypefaceFor(text: String): Typeface =
+        lookup(wideCache, text, fallback, fallbackProbe, primary, primaryProbe)
+
+    private fun lookup(
+        cache: HashMap<String, Typeface>,
+        text: String,
+        first: Typeface,
+        firstProbe: Paint,
+        second: Typeface,
+        secondProbe: Paint
+    ): Typeface {
+        cache[text]?.let { return it }
+        if (cache.size > 4096) cache.clear()
+        val tf = when {
+            firstProbe.hasGlyph(text) -> first
+            second !== first && secondProbe.hasGlyph(text) -> second
+            else -> Typeface.DEFAULT
+        }
+        cache[text] = tf
+        return tf
     }
 }
 
