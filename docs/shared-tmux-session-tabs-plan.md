@@ -52,7 +52,7 @@
 
 涉及文件：
 - **新增**：`core/api/tmux_handlers.go`、`core/api/tmux_handlers_test.go`
-- **修改**：[`core/api/server.go`](../core/api/server.go#L271)（注册路由；`summary()` 返回清洗后的 `workspace_name`）、`core/transport/transport.go`（`RelayConfig` 增加 `must_exist`）、`core/ssh/ssh.go`（`must_exist` 检查）、`core/relay/bootstrap.go`（`window-size` 改为附着后设置）
+- **修改**：[`core/api/server.go`](../core/api/server.go#L271)（注册路由；`summary()` 返回清洗后的 `workspace_name`）、`core/transport/transport.go`（`RelayConfig` 增加 `must_exist`）、`core/ssh/ssh.go`（`must_exist` 检查）
 
 ### 3.1 数据结构
 
@@ -103,7 +103,7 @@ type RemoteTmuxSession struct {
    - `OpenSession` 在启动 bootstrap 前，用同一连接执行 `tmux has-session -t '=<id>'`。
    - 不存在则返回 410 `TMUX_SESSION_GONE`，客户端移除该标签并刷新列表。
    - 从标签附着和自动重连都必须带 `must_exist: true`；只有 `+` 新建和主机默认连接允许创建会话。
-3. **`window-size latest`**：当前在附着前用 `tmux start-server \; set-option -g ...` 设置（`bootstrap.go:94`、`ssh.go:383`）。没有任何会话时服务器执行完即退出，选项会丢失（需实机确认）。改为附着时一并设置：`tmux new-session -A -s X \; set-option -g window-size latest`。
+3. **`window-size latest`**：当前在附着前用 `tmux start-server \; set-option -g ...` 设置（`bootstrap.go:94`、`ssh.go:383`），冷启动时可能丢失。v1 **不改**：tmux ≥ 3.1 默认即为 `latest`，而改成附着命令里串 `\; set-option` 在老版本 tmux 上有附着失败的风险。实机若发现尺寸不跟随，再改。
 
 ---
 
@@ -120,7 +120,7 @@ type RemoteTmuxSession struct {
    - kill 之后出现的断线或 502 一律视为成功，以刷新后的列表为准。
    - 若关闭的是当前标签，自动切到相邻标签。
 4. **另一端**：它附着的会话被杀后连接断开，重连时因 `must_exist` 收到 410，标签自动消失，不会复活成空会话。
-5. **密码**：两端各维护一份仅存于内存的 `hostId → 本次输入的密码`，同主机后续附着自动带上，避免每个标签弹一次密码框。不新增持久化，也不要把现有密码重试请求里的 `host_key.insecure_ignore`（`desktop/frontend/src/api.ts:647`、`CoreApiClient.kt:266`）扩散到更多请求。
+5. **密码**：两端各维护一份仅存于内存的 `hostId → 本次输入的密码`，同主机后续附着自动带上，避免每个标签弹一次密码框。不新增持久化。复用走的是现有密码重试的同一条请求路径（含 `host_key.insecure_ignore`，`desktop/frontend/src/api.ts:647`、`CoreApiClient.kt:266`），即只作用于本次运行里用户已经输过密码的那台主机，不扩散到其他主机。
 
 ---
 

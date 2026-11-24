@@ -16,6 +16,8 @@ export interface RelayConfig {
   session_name?: string;
   agent_path?: string;
   command?: string;
+  /** tmux only: attach only if the session still exists (410 TMUX_SESSION_GONE otherwise). */
+  must_exist?: boolean;
 }
 
 export interface HostProfile {
@@ -255,7 +257,6 @@ export interface RightRailVisibility {
   host_info: boolean;
   files: boolean;
   docker: boolean;
-  tmux: boolean;
   ai: boolean;
   port_forward: boolean;
   snippets: boolean;
@@ -655,6 +656,56 @@ export async function createSession(payload: {
 
 export async function deleteSession(id: string): Promise<void> {
   await apiRequest(`/api/v1/sessions/${encodeURIComponent(id)}`, "DELETE");
+}
+
+// Remote tmux conversations: the top tabs of a tmux host, shared with Android.
+export interface RemoteTmuxSession {
+  id: string;
+  title: string;
+  command: string;
+  busy: boolean;
+  path: string;
+  attached_clients: number;
+  created_unix: number;
+}
+
+export interface RemoteTmuxList {
+  available: boolean;
+  sessions: RemoteTmuxSession[];
+}
+
+export async function listRemoteTmuxSessions(sessionId: string): Promise<RemoteTmuxList> {
+  return apiRequest<RemoteTmuxList>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/tmux`);
+}
+
+export async function createRemoteTmuxSession(
+  sessionId: string,
+  title?: string
+): Promise<RemoteTmuxSession> {
+  return apiRequest<RemoteTmuxSession>(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/tmux`,
+    "POST",
+    title ? { title } : {}
+  );
+}
+
+export async function renameRemoteTmuxSession(
+  sessionId: string,
+  name: string,
+  title: string
+): Promise<{ id: string; title: string }> {
+  return apiRequest(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/tmux/${encodeURIComponent(name)}`,
+    "PATCH",
+    { title }
+  );
+}
+
+export async function killRemoteTmuxSession(sessionId: string, name: string): Promise<void> {
+  await apiRequest(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/tmux/${encodeURIComponent(name)}`,
+    "DELETE"
+  );
 }
 
 export async function getSessionStats(id: string): Promise<SystemStats> {

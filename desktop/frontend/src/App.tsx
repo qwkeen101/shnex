@@ -23,7 +23,6 @@ import {
   History,
   Info,
   Keyboard,
-  Layers,
   ListChecks,
   Maximize2,
   MessageSquare,
@@ -53,13 +52,16 @@ import {
   FileEntry,
   HostProfile,
   PortForwardRule,
+  RemoteTmuxSession,
   SessionLogMeta,
+  SessionSummary,
   Snippet,
   SystemStats,
   TailnetNode,
   TailnetStatus,
   UpsertHostInput,
   buildWallpaperUrl,
+  createRemoteTmuxSession,
   createSession,
   deleteHost,
   deleteSession,
@@ -75,8 +77,10 @@ import {
   importBackupBundle,
   importLocalSSHConfig,
   initBridge,
+  killRemoteTmuxSession,
   listHosts,
   listNotifications,
+  listRemoteTmuxSessions,
   listSessionForwards,
   listSessionLogs,
   listSnippets,
@@ -85,6 +89,7 @@ import {
   openNativeFileDialog,
   pingAllHosts,
   readLocalMarkdownFile,
+  renameRemoteTmuxSession,
   renderMarkdownNative,
   saveSettings,
   setTrayStyle,
@@ -116,6 +121,8 @@ interface WorkspaceTab {
   protocol?: string;
   localShellKey?: string;
   hostId?: string;
+  /** Remote tmux session this tab is attached to; set only for tmux hosts, whose top tabs are their tmux sessions. */
+  tmuxId?: string;
   title: string;
   icon?: string;
   badgeText?: string;
@@ -151,7 +158,6 @@ type RightPanelType =
   | "hostinfo"
   | "sftp"
   | "docker"
-  | "tmux"
   | "ai"
   | "tunnels"
   | "snippets"
@@ -204,8 +210,20 @@ export const App: React.FC = () => {
   const [forwards, setForwards] = useState<PortForwardRule[]>([]);
   const [newFwdLocalPort, setNewFwdLocalPort] = useState("8080");
   const [newFwdRemoteAddr, setNewFwdRemoteAddr] = useState("127.0.0.1:3000");
-  const [tmuxSessionsOut, setTmuxSessionsOut] = useState<string[]>([]);
-  const [newTmuxName, setNewTmuxName] = useState("");
+  // Remote tmux conversations of tmux hosts (keyed by hostId): the source of their top tabs.
+  const [remoteTmux, setRemoteTmux] = useState<Record<string, RemoteTmuxSession[]>>({});
+  const [renamingTmux, setRenamingTmux] = useState<{
+    hostId: string;
+    tmuxId: string;
+    value: string;
+  } | null>(null);
+  const renameCancelRef = useRef(false);
+  // Passwords typed during this run (memory only), so each further tab of the host does not prompt again.
+  const hostPasswordsRef = useRef<Record<string, string>>({});
+  // Tabs whose tmux session is being ended: they must never auto-reconnect.
+  const endingTmuxTabsRef = useRef<Set<string>>(new Set());
+  const tabsRef = useRef<WorkspaceTab[]>([]);
+  tabsRef.current = tabs;
   const [remoteCmdHistory, setRemoteCmdHistory] = useState<string[]>([]);
 
   // In-app Notification Toast Banner & Native Alert Modal (replaces browser wails.localhost alert)
@@ -233,6 +251,7 @@ export const App: React.FC = () => {
   const [pwPromptHost, setPwPromptHost] = useState<{
     hp: HostProfile;
     openSftpAfter: boolean;
+    retry?: (password: string) => Promise<void>;
   } | null>(null);
   const [pwPromptInput, setPwPromptInput] = useState("");
   const [pwPromptRemember, setPwPromptRemember] = useState(true);
@@ -457,20 +476,6 @@ export const App: React.FC = () => {
         .catch((e) => setInspectorOutput((e as Error).message))
         .finally(() => setInspectorBusy(false));
     }
-    if (openPanels.includes("tmux")) {
-      execSessionCommand(
-        primarySessionId,
-        "tmux list-sessions -F '#{session_name} (#{session_windows} 窗口)' 2>/dev/null || true"
-      )
-        .then((r) => {
-          const lines = (r.stdout || "")
-            .split("\n")
-            .map((x) => x.trim())
-            .filter(Boolean);
-          setTmuxSessionsOut(lines);
-        })
-        .catch(() => setTmuxSessionsOut([]));
-    }
     if (openPanels.includes("tunnels")) {
       listSessionForwards(primarySessionId)
         .then(setForwards)
@@ -509,11 +514,336 @@ export const App: React.FC = () => {
     ]);
   };
 
+  const newTabIds = () => {
+    const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    return { paneId: `pane-${sfx}`, tabId: `tab-${sfx}` };
+  };
+
+  const makeHostTab = (
+    hp: HostProfile,
+    ids: { paneId: string; tabId: string },
+    sessionId: string,
+    title: string,
+    tmuxId?: string
+  ): WorkspaceTab => ({
+    tabId: ids.tabId,
+    hostId: hp.id,
+    tmuxId,
+    title,
+    icon: hp.icon,
+    badgeText: hp.badge_text,
+    color: hp.color,
+    rawUserTarget: `${hp.user}@${hp.host}`,
+    splitDir: "row",
+    panes: [{ paneId: ids.paneId, sessionId }],
+    focusedPaneId: ids.paneId,
+    aiState: "idle",
+    latestStats: null,
+    sftpPath: hp.default_dir || "/",
+    metricsBar: hp.metrics_bar || "follow",
+    terminalEncoding: hp.terminal_encoding || "utf-8",
+  });
+
+  // Any connected tab of a tmux host can run the tmux API; prefer one not attached to avoidTabId.
+  const tmuxControlSession = (hostId: string, avoidTabId?: string) => {
+    const hostTabs = tabsRef.current.filter(
+      (t) => t.hostId === hostId && t.tmuxId && t.panes[0]
+    );
+    const pick = hostTabs.find((t) => t.tabId !== avoidTabId) ?? hostTabs[0];
+    return pick?.panes[0].sessionId;
+  };
+
+  const refreshRemoteTmux = async (hostId: string) => {
+    const sid = tmuxControlSession(hostId);
+    if (!sid) return;
+    try {
+      const list = await listRemoteTmuxSessions(sid);
+      if (list.available) {
+        setRemoteTmux((prev) => ({ ...prev, [hostId]: list.sessions }));
+      }
+    } catch {
+      // keep the last known list
+    }
+  };
+
+  // The tmux session a fresh connection attached to, or undefined when the host is not a tmux host.
+  const detectTmuxAttach = async (
+    summary: SessionSummary
+  ): Promise<{ tmuxId: string; sessions: RemoteTmuxSession[] } | undefined> => {
+    const ws = summary.workspace_name || "";
+    if (
+      (summary.relay_mode !== "tmux" && summary.relay_mode !== "auto") ||
+      !/^[A-Za-z0-9_-]{1,48}$/.test(ws)
+    ) {
+      return undefined;
+    }
+    try {
+      const list = await listRemoteTmuxSessions(summary.id);
+      return list.available ? { tmuxId: ws, sessions: list.sessions } : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Display order of a tmux host's conversations: remote list (by creation), then attached tabs not listed yet.
+  const tmuxGroupIds = (hostId: string) => {
+    const ids = (remoteTmux[hostId] || []).map((s) => s.id);
+    for (const t of tabsRef.current) {
+      if (t.hostId === hostId && t.tmuxId && !ids.includes(t.tmuxId)) ids.push(t.tmuxId);
+    }
+    return ids;
+  };
+
+  const removeTabLocally = (tabId: string) => {
+    const tab = tabsRef.current.find((t) => t.tabId === tabId);
+    if (!tab) return;
+    for (const p of tab.panes) {
+      delete paneSendersRef.current[p.paneId];
+      deleteSession(p.sessionId).catch(() => {});
+    }
+    setTabs((prev) => prev.filter((x) => x.tabId !== tabId));
+    setActiveTabId((cur) => {
+      if (cur !== tabId) return cur;
+      return tabsRef.current.find((x) => x.tabId !== tabId)?.tabId ?? null;
+    });
+  };
+
+  // Lazily attach to an existing remote conversation (never creates it: must_exist).
+  const attachRemoteTmux = async (
+    hostId: string,
+    remote: RemoteTmuxSession,
+    password?: string
+  ) => {
+    const already = tabsRef.current.find(
+      (t) => t.hostId === hostId && t.tmuxId === remote.id
+    );
+    if (already) {
+      setActiveTabId(already.tabId);
+      setShowSettings(false);
+      return;
+    }
+    const hp = hosts.find((h) => h.id === hostId);
+    if (!hp) return;
+    const lockKey = `${hostId}/${remote.id}`;
+    if (connectingLockRef.current.has(lockKey)) return;
+    connectingLockRef.current.add(lockKey);
+    try {
+      const summary = await createSession({
+        host_id: hostId,
+        cols: 110,
+        rows: 34,
+        password: password ?? hostPasswordsRef.current[hostId],
+        relay: { mode: "tmux", session_name: remote.id, must_exist: true },
+      });
+      if (password) hostPasswordsRef.current[hostId] = password;
+      const ids = newTabIds();
+      setTabs((prev) => [...prev, makeHostTab(hp, ids, summary.id, remote.title, remote.id)]);
+      setActiveTabId(ids.tabId);
+      setShowSettings(false);
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "TMUX_SESSION_GONE") {
+        setRemoteTmux((prev) => ({
+          ...prev,
+          [hostId]: (prev[hostId] || []).filter((s) => s.id !== remote.id),
+        }));
+        refreshRemoteTmux(hostId);
+      } else if (e instanceof ApiError && e.code === "AUTH_PASSWORD_NEEDED") {
+        delete hostPasswordsRef.current[hostId];
+        setPwPromptInput("");
+        setPwPromptHost({
+          hp,
+          openSftpAfter: false,
+          retry: (pw) => attachRemoteTmux(hostId, remote, pw),
+        });
+      } else {
+        alert(`打开对话「${remote.title}」失败: ${(e as Error).message}`);
+      }
+    } finally {
+      connectingLockRef.current.delete(lockKey);
+    }
+  };
+
+  // "+" on a tmux host: create a conversation on the remote host and attach to it.
+  const newRemoteTmux = async (hostId: string) => {
+    const sid = tmuxControlSession(hostId);
+    if (!sid) return;
+    try {
+      const created = await createRemoteTmuxSession(sid);
+      setRemoteTmux((prev) => ({
+        ...prev,
+        [hostId]: [...(prev[hostId] || []).filter((s) => s.id !== created.id), created],
+      }));
+      await attachRemoteTmux(hostId, created);
+      refreshRemoteTmux(hostId);
+    } catch (e) {
+      alert(`新建对话失败: ${(e as Error).message}`);
+    }
+  };
+
+  const startTmuxRename = (hostId: string, tmuxId: string, title: string) => {
+    renameCancelRef.current = false;
+    setRenamingTmux({ hostId, tmuxId, value: title });
+  };
+
+  const commitTmuxRename = async () => {
+    const r = renamingTmux;
+    const cancelled = renameCancelRef.current;
+    renameCancelRef.current = false;
+    setRenamingTmux(null);
+    if (!r || cancelled) return;
+    const title = r.value.trim();
+    const current = (remoteTmux[r.hostId] || []).find((s) => s.id === r.tmuxId);
+    if (!title || title === current?.title) return;
+    const sid = tmuxControlSession(r.hostId);
+    if (!sid) return;
+    try {
+      const res = await renameRemoteTmuxSession(sid, r.tmuxId, title);
+      setRemoteTmux((prev) => ({
+        ...prev,
+        [r.hostId]: (prev[r.hostId] || []).map((s) =>
+          s.id === r.tmuxId ? { ...s, title: res.title } : s
+        ),
+      }));
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.hostId === r.hostId && t.tmuxId === r.tmuxId ? { ...t, title: res.title } : t
+        )
+      );
+    } catch (e) {
+      alert(`改名失败: ${(e as Error).message}`);
+    }
+    refreshRemoteTmux(r.hostId);
+  };
+
+  // "×" on a tmux host ends the conversation on the remote host (switching away keeps it running).
+  const endRemoteTmux = async (hostId: string, tmuxId: string) => {
+    const tab = tabsRef.current.find((t) => t.hostId === hostId && t.tmuxId === tmuxId);
+    const sid = tmuxControlSession(hostId, tab?.tabId);
+    if (!sid) return;
+    let info = (remoteTmux[hostId] || []).find((s) => s.id === tmuxId);
+    try {
+      const list = await listRemoteTmuxSessions(sid);
+      info = list.sessions.find((s) => s.id === tmuxId) ?? info;
+    } catch {
+      // fall back to the last known state
+    }
+    const title = info?.title || tab?.title || tmuxId;
+    if (info?.busy && !window.confirm(`「${title}」正在运行 ${info.command}，确定结束？`)) {
+      return;
+    }
+    const order = tmuxGroupIds(hostId);
+    const idx = order.indexOf(tmuxId);
+    const rest = order.filter((id) => id !== tmuxId);
+    const nextId = rest.length > 0 ? rest[Math.min(Math.max(idx, 0), rest.length - 1)] : undefined;
+    const wasActive = Boolean(tab && tab.tabId === activeTabId);
+    const hostHasOtherTab = tabsRef.current.some(
+      (t) => t.hostId === hostId && t.tmuxId && t.tmuxId !== tmuxId
+    );
+
+    if (tab) endingTmuxTabsRef.current.add(tab.tabId);
+    try {
+      await killRemoteTmuxSession(sid, tmuxId);
+    } catch {
+      // killing the session this connection is attached to drops the connection; the refreshed list decides
+    }
+    if (tab) removeTabLocally(tab.tabId);
+    setRemoteTmux((prev) => ({
+      ...prev,
+      [hostId]: (prev[hostId] || []).filter((s) => s.id !== tmuxId),
+    }));
+
+    if (nextId && (wasActive || !hostHasOtherTab)) {
+      const nextTab = tabsRef.current.find((t) => t.hostId === hostId && t.tmuxId === nextId);
+      const nextRemote = (remoteTmux[hostId] || []).find((s) => s.id === nextId);
+      if (nextTab) {
+        setActiveTabId(nextTab.tabId);
+      } else if (nextRemote) {
+        await attachRemoteTmux(hostId, nextRemote);
+      }
+    }
+    window.setTimeout(() => refreshRemoteTmux(hostId), 800);
+  };
+
+  // Refresh every tmux host's conversation list when the window regains focus.
+  useEffect(() => {
+    const onFocus = () => {
+      const hostIds = new Set(
+        tabsRef.current.filter((t) => t.tmuxId && t.hostId).map((t) => t.hostId as string)
+      );
+      hostIds.forEach((h) => refreshRemoteTmux(h));
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Top tab bar: a tmux host's tabs are its remote conversations (created order), attached or not.
+  type TopTabItem =
+    | { kind: "tab"; tab: WorkspaceTab; remote?: RemoteTmuxSession }
+    | { kind: "ghost"; hostId: string; remote: RemoteTmuxSession };
+  const topTabItems: TopTabItem[] = [];
+  {
+    const doneHosts = new Set<string>();
+    for (const tab of tabs) {
+      if (!tab.tmuxId || !tab.hostId) {
+        topTabItems.push({ kind: "tab", tab });
+        continue;
+      }
+      if (doneHosts.has(tab.hostId)) continue;
+      doneHosts.add(tab.hostId);
+      const hostTabs = tabs.filter((t) => t.hostId === tab.hostId && t.tmuxId);
+      const remote = remoteTmux[tab.hostId] || [];
+      for (const r of remote) {
+        const attached = hostTabs.find((t) => t.tmuxId === r.id);
+        topTabItems.push(
+          attached
+            ? { kind: "tab", tab: attached, remote: r }
+            : { kind: "ghost", hostId: tab.hostId, remote: r }
+        );
+      }
+      for (const t of hostTabs) {
+        if (!remote.some((r) => r.id === t.tmuxId)) topTabItems.push({ kind: "tab", tab: t });
+      }
+    }
+  }
+
+  const renderTmuxRenameInput = () => (
+    <input
+      autoFocus
+      value={renamingTmux?.value ?? ""}
+      maxLength={40}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onChange={(e) => {
+        const value = e.target.value;
+        setRenamingTmux((r) => (r ? { ...r, value } : r));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+          renameCancelRef.current = true;
+          e.currentTarget.blur();
+        }
+      }}
+      onBlur={commitTmuxRename}
+      className="w-[110px] px-1 rounded bg-[#0f1013] border border-[#3b82f6] text-white outline-none"
+    />
+  );
+
   const openHostWorkspace = async (
     hp: HostProfile,
     openSftpAfter = false,
     overridePassword?: string
   ) => {
+    // A tmux host is already represented by its conversation tabs: focus them instead of a duplicate client.
+    const existingTmuxTab = tabsRef.current.find((t) => t.hostId === hp.id && t.tmuxId);
+    if (existingTmuxTab) {
+      setActiveTabId(existingTmuxTab.tabId);
+      setShowSettings(false);
+      if (openSftpAfter) setOpenPanels(["sftp"]);
+      refreshRemoteTmux(hp.id);
+      return;
+    }
     if (connectingLockRef.current.has(hp.id)) return;
     connectingLockRef.current.add(hp.id);
     setConnectingId(hp.id);
@@ -522,30 +852,31 @@ export const App: React.FC = () => {
         host_id: hp.id,
         cols: 110,
         rows: 34,
-        password: overridePassword,
+        password: overridePassword ?? hostPasswordsRef.current[hp.id],
       });
-      const paneId = `pane-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const tabId = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      if (overridePassword) hostPasswordsRef.current[hp.id] = overridePassword;
+      const tmux = await detectTmuxAttach(summary);
+      if (tmux) {
+        const dup = tabsRef.current.find(
+          (t) => t.hostId === hp.id && t.tmuxId === tmux.tmuxId
+        );
+        if (dup) {
+          deleteSession(summary.id).catch(() => {});
+          setActiveTabId(dup.tabId);
+          setShowSettings(false);
+          return;
+        }
+        setRemoteTmux((prev) => ({ ...prev, [hp.id]: tmux.sessions }));
+        // the relay may create the default session just after connecting
+        window.setTimeout(() => refreshRemoteTmux(hp.id), 2000);
+      }
+      const ids = newTabIds();
       const rawUT = `${hp.user}@${hp.host}`;
-      const newTab: WorkspaceTab = {
-        tabId,
-        hostId: hp.id,
-        title: hp.name,
-        icon: hp.icon,
-        badgeText: hp.badge_text,
-        color: hp.color,
-        rawUserTarget: rawUT,
-        splitDir: "row",
-        panes: [{ paneId, sessionId: summary.id }],
-        focusedPaneId: paneId,
-        aiState: "idle",
-        latestStats: null,
-        sftpPath: hp.default_dir || "/",
-        metricsBar: hp.metrics_bar || "follow",
-        terminalEncoding: hp.terminal_encoding || "utf-8",
-      };
-      setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(tabId);
+      const tabTitle = tmux
+        ? tmux.sessions.find((s) => s.id === tmux.tmuxId)?.title || tmux.tmuxId
+        : hp.name;
+      setTabs((prev) => [...prev, makeHostTab(hp, ids, summary.id, tabTitle, tmux?.tmuxId)]);
+      setActiveTabId(ids.tabId);
       setShowSettings(false);
       recordHistory(hp.name, rawUT, hp.id);
       listHosts().then(setHosts).catch(() => {});
@@ -554,6 +885,7 @@ export const App: React.FC = () => {
       }
     } catch (e) {
       if (e instanceof ApiError && e.code === "AUTH_PASSWORD_NEEDED") {
+        delete hostPasswordsRef.current[hp.id];
         setPwPromptInput("");
         setPwPromptHost({ hp, openSftpAfter });
       } else {
@@ -568,7 +900,7 @@ export const App: React.FC = () => {
   const handlePasswordPromptSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pwPromptHost || !pwPromptInput) return;
-    const { hp, openSftpAfter } = pwPromptHost;
+    const { hp, openSftpAfter, retry } = pwPromptHost;
     setPwPromptBusy(true);
     try {
       if (pwPromptRemember) {
@@ -602,7 +934,11 @@ export const App: React.FC = () => {
         setHosts(await listHosts());
       }
       setPwPromptHost(null);
-      await openHostWorkspace(hp, openSftpAfter, pwPromptInput);
+      if (retry) {
+        await retry(pwPromptInput);
+      } else {
+        await openHostWorkspace(hp, openSftpAfter, pwPromptInput);
+      }
     } catch (ex) {
       alert((ex as Error).message);
     } finally {
@@ -915,9 +1251,10 @@ export const App: React.FC = () => {
     rawUserTarget?: string,
     lastReportedDir?: string
   ) => {
+    const targetTab = tabsRef.current.find((t) => t.tabId === tabId);
+    if (endingTmuxTabsRef.current.has(tabId)) return;
     deleteSession(oldSessionId).catch(() => {});
     try {
-      const targetTab = tabs.find((t) => t.tabId === tabId);
       if (targetTab?.protocol === "local") {
         const summary = await createSession({
           protocol: "local",
@@ -942,8 +1279,9 @@ export const App: React.FC = () => {
       }
 
       const hp = hosts.find((h) => h.id === hostId);
+      const tmuxId = targetTab?.tmuxId;
       const hasTmux =
-        Boolean(hp?.tmux_session?.trim()) || hp?.relay?.mode === "tmux";
+        Boolean(tmuxId) || Boolean(hp?.tmux_session?.trim()) || hp?.relay?.mode === "tmux";
       const shouldRestoreDir =
         (appSettings?.terminal.restore_dir_on_reconnect ?? true) &&
         !hasTmux &&
@@ -956,6 +1294,13 @@ export const App: React.FC = () => {
         default_dir: shouldRestoreDir ? lastReportedDir : undefined,
         cols: 110,
         rows: 34,
+        password: hostId ? hostPasswordsRef.current[hostId] : undefined,
+        // the conversation pane re-attaches only if it still exists; split panes stay plain shells
+        relay: tmuxId
+          ? targetTab?.panes[0]?.paneId === paneId
+            ? { mode: "tmux", session_name: tmuxId, must_exist: true }
+            : { mode: "none" }
+          : undefined,
       });
       setTabs((prev) =>
         prev.map((t) =>
@@ -970,6 +1315,18 @@ export const App: React.FC = () => {
         )
       );
     } catch (e) {
+      if (e instanceof ApiError && e.code === "TMUX_SESSION_GONE" && targetTab?.hostId) {
+        // ended on another device: drop the tab instead of resurrecting an empty conversation
+        const goneHost = targetTab.hostId;
+        const goneId = targetTab.tmuxId;
+        removeTabLocally(tabId);
+        setRemoteTmux((prev) => ({
+          ...prev,
+          [goneHost]: (prev[goneHost] || []).filter((s) => s.id !== goneId),
+        }));
+        window.setTimeout(() => refreshRemoteTmux(goneHost), 800);
+        return;
+      }
       alert(`重连失败: ${(e as Error).message}`);
     }
   };
@@ -1239,7 +1596,56 @@ export const App: React.FC = () => {
                 : "hidden"
             }
           >
-            {tabs.map((tab) => {
+            {topTabItems.map((item) => {
+              if (item.kind === "ghost") {
+                // a conversation on the remote host not opened here yet: dim, attaches on click
+                const ghostHost = hosts.find((h) => h.id === item.hostId);
+                const renaming =
+                  renamingTmux?.hostId === item.hostId &&
+                  renamingTmux.tmuxId === item.remote.id;
+                return (
+                  <div
+                    key={`ghost-${item.hostId}-${item.remote.id}`}
+                    onClick={() => attachRemoteTmux(item.hostId, item.remote)}
+                    onDoubleClick={() =>
+                      startTmuxRename(item.hostId, item.remote.id, item.remote.title)
+                    }
+                    title={
+                      item.remote.busy
+                        ? `${item.remote.title} · 正在运行 ${item.remote.command}`
+                        : item.remote.title
+                    }
+                    className="h-7 px-3 rounded-md flex items-center gap-2 cursor-pointer border border-transparent text-[#5d626d] hover:bg-[#272930] hover:text-[#aeb3bd]"
+                  >
+                    <span className="flex opacity-50">
+                      <HostBadge
+                        icon={ghostHost?.icon}
+                        badgeText={ghostHost?.badge_text}
+                        color={ghostHost?.color}
+                        size="xs"
+                      />
+                    </span>
+                    {renaming ? (
+                      renderTmuxRenameInput()
+                    ) : (
+                      <span className="font-medium truncate max-w-[130px]">
+                        {item.remote.title}
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        endRemoteTmux(item.hostId, item.remote.id);
+                      }}
+                      className="p-0.5 rounded hover:bg-[#2e313b] text-[#6b7280] hover:text-white"
+                      title="结束对话"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                );
+              }
+              const tab = item.tab;
               const isAct = tab.tabId === activeTabId;
               const isMd = tab.protocol === "markdown";
               const extraCount = isMd
@@ -1251,6 +1657,11 @@ export const App: React.FC = () => {
                   onClick={() => {
                     setActiveTabId(tab.tabId);
                     setShowSettings(false);
+                  }}
+                  onDoubleClick={() => {
+                    if (tab.tmuxId && tab.hostId) {
+                      startTmuxRename(tab.hostId, tab.tmuxId, item.remote?.title ?? tab.title);
+                    }
                   }}
                   className={`h-7 px-3 rounded-md flex items-center gap-2 cursor-pointer border transition-colors ${
                     isAct && !showSettings
@@ -1270,10 +1681,16 @@ export const App: React.FC = () => {
                       size="xs"
                     />
                   )}
-                  <span className="font-medium truncate max-w-[130px]">
-                    {tab.title}
-                    {extraCount > 0 ? ` +${extraCount}` : ""}
-                  </span>
+                  {renamingTmux &&
+                  renamingTmux.hostId === tab.hostId &&
+                  renamingTmux.tmuxId === tab.tmuxId ? (
+                    renderTmuxRenameInput()
+                  ) : (
+                    <span className="font-medium truncate max-w-[130px]">
+                      {item.remote?.title ?? tab.title}
+                      {extraCount > 0 ? ` +${extraCount}` : ""}
+                    </span>
+                  )}
                   {!isMd && (
                     <span
                       className={`w-1.5 h-1.5 rounded-full ${
@@ -1286,9 +1703,14 @@ export const App: React.FC = () => {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      closeWholeTab(tab);
+                      if (tab.tmuxId && tab.hostId) {
+                        endRemoteTmux(tab.hostId, tab.tmuxId);
+                      } else {
+                        closeWholeTab(tab);
+                      }
                     }}
                     className="p-0.5 rounded hover:bg-[#2e313b] text-[#8b909a] hover:text-white"
+                    title={tab.tmuxId ? "结束对话" : undefined}
                   >
                     <X size={12} />
                   </button>
@@ -1307,9 +1729,16 @@ export const App: React.FC = () => {
 
             {tabs.length > 0 && (
               <button
-                onClick={() => setShowQuickConnect(true)}
+                onClick={() => {
+                  // on a tmux host "+" is a new conversation on that host
+                  if (activeTab?.tmuxId && activeTab.hostId) {
+                    newRemoteTmux(activeTab.hostId);
+                  } else {
+                    setShowQuickConnect(true);
+                  }
+                }}
                 className="p-1.5 rounded hover:bg-[#272930] text-[#8b909a] hover:text-white"
-                title="快速打开远程 SSH 连接"
+                title={activeTab?.tmuxId ? "新建对话" : "快速打开远程 SSH 连接"}
               >
                 <Plus size={14} />
               </button>
@@ -2268,69 +2697,6 @@ export const App: React.FC = () => {
                 </div>
               )}
 
-              {activeTab && isPanelOpen("tmux") && primarySessionId && (
-                <div className="w-[285px] h-full bg-[#1b1c20] border-l border-[#282a32] flex flex-col shrink-0">
-                  <div className="h-9 px-3 border-b border-[#282a32] flex items-center justify-between">
-                    <span className="font-semibold">tmux 会话</span>
-                    <button
-                      onClick={() => closePanel("tmux")}
-                      className="p-1 rounded hover:bg-[#2a2d36] text-[#8b909a]"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                  <div className="p-2.5 border-b border-[#282a32] flex gap-1.5">
-                    <input
-                      value={newTmuxName}
-                      onChange={(e) => setNewTmuxName(e.target.value)}
-                      placeholder="会话名 (如 main)"
-                      className="flex-1 px-2 py-1 rounded bg-[#141519] border border-[#2d3039] font-mono outline-none"
-                    />
-                    <button
-                      onClick={() => {
-                        const nm = newTmuxName.trim() || "main";
-                        paneSendersRef.current[activeTab.focusedPaneId]?.(
-                          `tmux new-session -A -s '${nm.replace(/'/g, "")}'\n`
-                        );
-                        setNewTmuxName("");
-                      }}
-                      className="px-2.5 py-1 rounded bg-[#2563eb] text-white"
-                    >
-                      附加/新建
-                    </button>
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
-                    {tmuxSessionsOut.length === 0 ? (
-                      <div className="text-center text-[#6b7280] py-8">
-                        远端当前无运行中的 tmux 会话
-                      </div>
-                    ) : (
-                      tmuxSessionsOut.map((line, i) => {
-                        const sName = line.split(" (")[0];
-                        return (
-                          <div
-                            key={i}
-                            onClick={() =>
-                              paneSendersRef.current[activeTab.focusedPaneId]?.(
-                                `tmux attach -t '${sName.replace(/'/g, "")}'\n`
-                              )
-                            }
-                            className="p-2.5 rounded-lg bg-[#23252c] border border-[#2e313b] hover:border-[#3b82f6] cursor-pointer flex items-center justify-between"
-                          >
-                            <span className="font-mono text-[#e5e7eb]">
-                              {line}
-                            </span>
-                            <span className="text-[11px] text-[#60a5fa]">
-                              附加
-                            </span>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-
               {activeTab && isPanelOpen("tunnels") && primarySessionId && (
                 <div className="w-[300px] h-full bg-[#1b1c20] border-l border-[#282a32] flex flex-col shrink-0">
                   <div className="h-9 px-3 border-b border-[#282a32] flex items-center justify-between">
@@ -2816,20 +3182,6 @@ export const App: React.FC = () => {
                 title="Docker 管理"
               >
                 <Container size={14} />
-              </button>
-            )}
-            {(appSettings?.general?.right_rail_items?.tmux ?? true) && (
-              <button
-                disabled={!isActiveSSHTab}
-                onClick={() => toggleRightTool("tmux")}
-                className={`w-7 h-7 rounded-lg flex items-center justify-center transition disabled:opacity-35 ${
-                  isPanelOpen("tmux")
-                    ? "bg-[#2563eb] text-white"
-                    : "hover:bg-[#2a2c33] hover:text-white"
-                }`}
-                title="tmux 会话"
-              >
-                <Layers size={14} />
               </button>
             )}
             {(appSettings?.general?.right_rail_items?.ai ?? true) && (

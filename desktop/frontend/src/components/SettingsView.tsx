@@ -17,7 +17,6 @@ import {
   Info,
   KeyRound,
   Keyboard,
-  Layers,
   Lock,
   Minus,
   Palette,
@@ -336,7 +335,7 @@ export const SettingsView: React.FC<Props> = ({
           id: "general",
           label: "通用",
           keywords:
-            "语言 记忆布局 右侧栏工具 替换显示 并排显示 续费提醒 通知测试 窗口 托盘 关闭 更新 自动检查 右侧栏显示项 端口转发 tmux",
+            "语言 记忆布局 右侧栏工具 替换显示 并排显示 续费提醒 通知测试 窗口 托盘 关闭 更新 自动检查 右侧栏显示项 端口转发",
           icon: <Settings size={14} />,
         },
         {
@@ -948,7 +947,6 @@ export const SettingsView: React.FC<Props> = ({
                         ["host_info", "主机详情", <Info size={14} />],
                         ["files", "文件", <Folder size={14} />],
                         ["docker", "Docker 管理", <Container size={14} />],
-                        ["tmux", "tmux 会话", <Layers size={14} />],
                         ["ai", "AI助理", <Bot size={14} />],
                         [
                           "port_forward",
@@ -988,7 +986,6 @@ export const SettingsView: React.FC<Props> = ({
                                   host_info: true,
                                   files: true,
                                   docker: true,
-                                  tmux: true,
                                   ai: true,
                                   port_forward: true,
                                   snippets: true,
