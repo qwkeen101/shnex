@@ -29,7 +29,19 @@ data class HostItem(
     val tmuxSession: String,
     val useTsnet: Boolean,
     val postLoginScript: String,
-    val hasSecret: Boolean
+    val hasSecret: Boolean,
+    val proxyUrl: String = "",
+    /** ordered routes raced primary-first: pool proxy ids or "direct" */
+    val proxyIds: List<String> = emptyList()
+)
+
+/** One proxy of the pool (Settings > 代理); hosts pick ① / ② from it. */
+data class ProxyItem(
+    val id: String,
+    val name: String,
+    val scheme: String,
+    val host: String,
+    val port: Int
 )
 
 data class SessionInfo(
@@ -38,7 +50,9 @@ data class SessionInfo(
     val target: String,
     val user: String,
     val relayMode: String = "",
-    val workspaceName: String = ""
+    val workspaceName: String = "",
+    val routeVia: String = "",
+    val routeFallback: Boolean = false
 )
 
 /** A conversation on the remote host (a tmux session), shared with the desktop app. */
@@ -180,7 +194,9 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
                         tmuxSession = tmux,
                         useTsnet = route?.optBoolean("use_tsnet", false) ?: false,
                         postLoginScript = h.optString("post_login_script"),
-                        hasSecret = h.optBoolean("has_secret", false)
+                        hasSecret = h.optBoolean("has_secret", false),
+                        proxyUrl = route?.optString("proxy_url").orEmpty(),
+                        proxyIds = route?.optJSONArray("proxy_ids").toStringList()
                     )
                 )
             }
@@ -197,7 +213,9 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
         privateKeyPem: String,
         tmuxSession: String,
         useTsnet: Boolean,
-        postLoginScript: String
+        postLoginScript: String,
+        proxyUrl: String = "",
+        proxyIds: List<String> = emptyList()
     ): HostItem {
         val authMode = when {
             privateKeyPem.isNotBlank() -> "private_key"
@@ -216,7 +234,14 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
             put("tmux_session", tmuxSession)
             put("post_login_script", postLoginScript)
             put("host_key", JSONObject().put("insecure_ignore", true))
-            put("route", JSONObject().put("use_tsnet", useTsnet))
+            // send the whole route: the core replaces it on save
+            put(
+                "route",
+                JSONObject()
+                    .put("use_tsnet", useTsnet)
+                    .put("proxy_url", proxyUrl)
+                    .put("proxy_ids", JSONArray(proxyIds))
+            )
             if (tmuxSession.isNotBlank()) {
                 put(
                     "relay",
@@ -240,9 +265,45 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
             tmuxSession = h.optString("tmux_session"),
             useTsnet = useTsnet,
             postLoginScript = h.optString("post_login_script"),
-            hasSecret = h.optBoolean("has_secret", false)
+            hasSecret = h.optBoolean("has_secret", false),
+            proxyUrl = proxyUrl,
+            proxyIds = proxyIds
         )
     }
+
+    private fun JSONArray?.toStringList(): List<String> =
+        if (this == null) emptyList() else (0 until length()).map { optString(it) }.filter { it.isNotBlank() }
+
+    private fun parseProxies(settings: JSONObject): List<ProxyItem> {
+        val arr = settings.optJSONArray("proxies") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val p = arr.getJSONObject(i)
+            ProxyItem(
+                id = p.optString("id"),
+                name = p.optString("name"),
+                scheme = p.optString("scheme"),
+                host = p.optString("host"),
+                port = p.optInt("port")
+            )
+        }
+    }
+
+    suspend fun listProxies(): List<ProxyItem> = parseProxies(requestJson("/api/v1/settings"))
+
+    /** Paste-to-import: one link per line. Returns the new pool and per-line error messages. */
+    suspend fun importProxies(text: String): Pair<List<ProxyItem>, List<String>> {
+        val res = requestJson("/api/v1/settings/proxies/import", "POST", JSONObject().put("text", text))
+        val errs = res.optJSONArray("errors")
+        val messages = if (errs == null) emptyList() else (0 until errs.length()).map { i ->
+            val e = errs.getJSONObject(i)
+            "第 ${e.optInt("line")} 行：${e.optString("error")}"
+        }
+        return parseProxies(res.optJSONObject("settings") ?: JSONObject()) to messages
+    }
+
+    /** Fails with the list of hosts when a host still routes through this proxy. */
+    suspend fun deleteProxy(id: String): List<ProxyItem> =
+        parseProxies(requestJson("/api/v1/settings/proxies/$id", "DELETE"))
 
     suspend fun deleteHost(id: String) {
         requestJson("/api/v1/hosts/$id", "DELETE")
@@ -305,7 +366,9 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
             target = res.optString("target"),
             user = res.optString("user"),
             relayMode = res.optString("relay_mode"),
-            workspaceName = res.optString("workspace_name")
+            workspaceName = res.optString("workspace_name"),
+            routeVia = res.optString("route_via"),
+            routeFallback = res.optBoolean("route_fallback", false)
         )
     }
 

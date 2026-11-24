@@ -17,6 +17,7 @@ import dev.shnex.app.data.CompiledMarkdownDoc
 import dev.shnex.app.data.CompletionItem
 import dev.shnex.app.data.CoreApiClient
 import dev.shnex.app.data.HostItem
+import dev.shnex.app.data.ProxyItem
 import dev.shnex.app.data.RemoteFileEntry
 import dev.shnex.app.data.RemoteTmuxSession
 import dev.shnex.app.data.SessionInfo
@@ -172,6 +173,7 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     val hosts = mutableStateListOf<HostItem>()
+    val proxies = mutableStateListOf<ProxyItem>()
     val latencies = mutableStateMapOf<String, Long>()
     val tabs = mutableStateListOf<LiveTerminalTab>()
     var activeTabId by mutableStateOf<String?>(null)
@@ -236,6 +238,7 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
                     val client = CoreApiClient(ep)
                     apiClient = client
                     reloadHosts()
+                    reloadProxies()
                     refreshTailnet()
                 }
             }
@@ -288,6 +291,50 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun reloadProxies() {
+        val client = apiClient ?: return
+        viewModelScope.launch {
+            runCatching { client.listProxies() }.onSuccess { list ->
+                proxies.clear()
+                proxies.addAll(list)
+            }
+        }
+    }
+
+    /** onResult gets a short message for the import dialog. */
+    fun importProxies(text: String, onResult: (String) -> Unit) {
+        val client = apiClient ?: return
+        viewModelScope.launch {
+            runCatching { client.importProxies(text) }
+                .onSuccess { (list, errors) ->
+                    val added = list.size - proxies.size
+                    proxies.clear()
+                    proxies.addAll(list)
+                    onResult(if (errors.isEmpty()) "" else errors.joinToString("\n"))
+                    if (errors.isEmpty()) showToast("已导入 ${maxOf(added, 0)} 个代理")
+                }
+                .onFailure { e -> onResult(e.message ?: "导入失败") }
+        }
+    }
+
+    fun deleteProxy(id: String) {
+        val client = apiClient ?: return
+        viewModelScope.launch {
+            runCatching { client.deleteProxy(id) }
+                .onSuccess { list ->
+                    proxies.clear()
+                    proxies.addAll(list)
+                }
+                .onFailure { e -> showToast(e.message ?: "删除失败") }
+        }
+    }
+
+    private fun noteRouteFallback(sess: SessionInfo) {
+        if (sess.routeFallback && sess.routeVia.isNotBlank()) {
+            showToast("主代理不通，已经备用「${sess.routeVia}」连接")
+        }
+    }
+
     fun pingHosts() {
         val client = apiClient ?: return
         viewModelScope.launch {
@@ -311,6 +358,8 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         tmuxSession: String,
         useTsnet: Boolean,
         postLoginScript: String,
+        proxyUrl: String = "",
+        proxyIds: List<String> = emptyList(),
         onResult: (Result<HostItem>) -> Unit = {}
     ) {
         viewModelScope.launch {
@@ -341,7 +390,9 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
                     privateKeyPem = privateKeyPem,
                     tmuxSession = tmuxSession,
                     useTsnet = useTsnet,
-                    postLoginScript = postLoginScript
+                    postLoginScript = postLoginScript,
+                    proxyUrl = proxyUrl,
+                    proxyIds = proxyIds
                 )
             }
             result.onSuccess {
@@ -403,6 +454,7 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 if (passwordOverride != null) hostPasswords[host.id] = passwordOverride
                 passwordPromptHost = null
+                noteRouteFallback(sess)
                 val tmux = detectTmux(client, sess)
                 if (tmux != null) {
                     remoteTmux[host.id] = tmux.second
@@ -647,6 +699,7 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
                     tmuxSession = tmuxId
                 )
                 if (password != null) hostPasswords[hostId] = password
+                noteRouteFallback(sess)
                 attachNewSessionTab(
                     client = client,
                     sessionId = sess.id,

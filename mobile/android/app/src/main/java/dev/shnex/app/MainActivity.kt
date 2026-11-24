@@ -102,6 +102,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.shnex.app.data.HostItem
+import dev.shnex.app.data.ProxyItem
 import dev.shnex.app.service.ShnexRelayService
 import dev.shnex.app.terminal.FontCatalog
 import dev.shnex.app.terminal.TerminalCanvasView
@@ -349,8 +350,9 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
     if (showHostDialog) {
         HostEditDialog(
             initial = editingHost,
+            proxies = vm.proxies.toList(),
             onDismiss = { showHostDialog = false },
-            onSave = { name, host, port, user, pw, pk, tmux, tsnet, script, onDone ->
+            onSave = { name, host, port, user, pw, pk, tmux, tsnet, script, proxyUrl, proxyIds, onDone ->
                 vm.saveHost(
                     id = editingHost?.id,
                     name = name,
@@ -362,6 +364,8 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
                     tmuxSession = tmux,
                     useTsnet = tsnet,
                     postLoginScript = script,
+                    proxyUrl = proxyUrl,
+                    proxyIds = proxyIds,
                     onResult = { res ->
                         onDone(res.exceptionOrNull()?.message)
                         if (res.isSuccess) {
@@ -1100,6 +1104,101 @@ private fun SessionChip(
     }
 }
 
+/** A labelled dropdown for picking a host route (proxy ① / ②). */
+@Composable
+private fun RoutePicker(
+    title: String,
+    current: String,
+    options: List<Pair<String, String>>,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, Color(0xFF3A3D48), RoundedCornerShape(8.dp))
+                .clickable(enabled = enabled) { open = true }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            Text(title, color = Color(0xFF8B909A), fontSize = 10.sp)
+            Text(
+                current,
+                color = if (enabled) Color.White else Color(0xFF5D626D),
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            options.forEach { (value, text) ->
+                DropdownMenuItem(
+                    text = { Text(text) },
+                    onClick = {
+                        open = false
+                        onSelect(value)
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** Settings › 代理: the proxy pool. Pasting links is the import. */
+@Composable
+private fun ProxyPoolDialog(vm: WorkbenchViewModel, onDismiss: () -> Unit) {
+    var links by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("代理", fontSize = 16.sp) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                vm.proxies.forEach { p ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(p.name, color = Color.White, fontSize = 13.sp)
+                            Text(
+                                "${p.scheme}://${p.host}:${p.port}",
+                                color = Color(0xFF8B909A),
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        IconButton(onClick = { vm.deleteProxy(p.id) }, modifier = Modifier.size(30.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "删除", tint = Color(0xFF8B909A), modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = links,
+                    onValueChange = { links = it },
+                    label = { Text("粘贴代理链接，每行一个") },
+                    placeholder = { Text("socks5://用户:密码@1.2.3.4:1080#香港", fontSize = 12.sp) },
+                    minLines = 2,
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (message.isNotEmpty()) {
+                    Text(message, color = Color(0xFFFCA5A5), fontSize = 11.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(enabled = links.isNotBlank(), onClick = {
+                vm.importProxies(links) { msg ->
+                    message = msg
+                    if (msg.isEmpty()) links = ""
+                }
+            }) { Text("导入") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
 @Composable
 private fun ExtraKeyChip(
     label: String,
@@ -1134,6 +1233,11 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
     var controlUrl by remember { mutableStateOf("") }
     var authKey by remember { mutableStateOf("") }
     var showTsDialog by remember { mutableStateOf(false) }
+    var showProxyDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { vm.reloadProxies() }
+    if (showProxyDialog) {
+        ProxyPoolDialog(vm = vm, onDismiss = { showProxyDialog = false })
+    }
     var showAppearance by remember { mutableStateOf(false) }
 
     if (showAppearance) {
@@ -1209,6 +1313,23 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
+                }
+                HorizontalDivider(color = Color(0xFF262934))
+
+                // Proxy pool: hosts pick their primary / backup route from it
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showProxyDialog = true }
+                        .padding(15.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("代理", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("粘贴链接导入；主机里选主备，主不通自动走备", color = Color(0xFF8B909A), fontSize = 12.sp)
+                    }
+                    Text("${vm.proxies.size} 个", color = Color(0xFF9CA3AF), fontSize = 12.sp)
                 }
                 HorizontalDivider(color = Color(0xFF262934))
 
@@ -1339,6 +1460,7 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
 @Composable
 private fun HostEditDialog(
     initial: HostItem?,
+    proxies: List<ProxyItem>,
     onDismiss: () -> Unit,
     onSave: (
         name: String,
@@ -1350,6 +1472,8 @@ private fun HostEditDialog(
         tmuxSession: String,
         useTsnet: Boolean,
         postLoginScript: String,
+        proxyUrl: String,
+        proxyIds: List<String>,
         onDone: (errorMessage: String?) -> Unit
     ) -> Unit
 ) {
@@ -1366,6 +1490,15 @@ private fun HostEditDialog(
     var tmuxSession by remember { mutableStateOf(initial?.tmuxSession ?: "main") }
     var useTsnet by remember { mutableStateOf(initial?.useTsnet ?: false) }
     var postScript by remember { mutableStateOf(initial?.postLoginScript ?: "") }
+    // Routes ① / ②: "" = automatic (system proxy), "direct", or a pool proxy id.
+    // A proxy_url set on the desktop is kept untouched while ① stays automatic.
+    var route1 by remember {
+        mutableStateOf(
+            initial?.proxyIds?.getOrNull(0)
+                ?: if (initial?.proxyUrl == "direct") "direct" else ""
+        )
+    }
+    var route2 by remember { mutableStateOf(initial?.proxyIds?.getOrNull(1) ?: "") }
 
     var hostMissingError by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
@@ -1500,6 +1633,39 @@ private fun HostEditDialog(
                         Checkbox(checked = useTsnet, onCheckedChange = { useTsnet = it })
                         Text("通过内置 Tailscale / Headscale 直连", fontSize = 12.sp)
                     }
+                    if (!useTsnet) {
+                        val names = proxies.associate { it.id to it.name }
+                        fun label(v: String, empty: String) = when (v) {
+                            "" -> empty
+                            "direct" -> "直连"
+                            else -> names[v] ?: "已删除的代理"
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            RoutePicker(
+                                title = "代理 ① 主",
+                                current = label(route1, "自动（系统代理）"),
+                                options = listOf("" to "自动（系统代理）", "direct" to "直连") +
+                                    proxies.map { it.id to it.name },
+                                enabled = true,
+                                modifier = Modifier.weight(1f)
+                            ) { v ->
+                                route1 = v
+                                if (v == route2 || v == "") route2 = ""
+                            }
+                            RoutePicker(
+                                title = "代理 ② 备",
+                                current = label(route2, "无备用"),
+                                options = listOf("" to "无备用") +
+                                    (if (route1 != "direct") listOf("direct" to "直连") else emptyList()) +
+                                    proxies.filter { it.id != route1 }.map { it.id to it.name },
+                                enabled = route1 != "",
+                                modifier = Modifier.weight(1f)
+                            ) { v -> route2 = v }
+                        }
+                        if (proxies.isEmpty()) {
+                            Text("在「设置 › 代理」里粘贴代理链接后可在此选择", color = Color(0xFF8B909A), fontSize = 11.sp)
+                        }
+                    }
                 }
 
                 formError?.let { errText ->
@@ -1572,7 +1738,14 @@ private fun HostEditDialog(
                         trimmedKey,
                         tmuxSession.trim(),
                         useTsnet,
-                        postScript
+                        postScript,
+                        when {
+                            route1 == "" -> initial?.proxyUrl?.takeIf { it != "direct" }.orEmpty()
+                            route1 == "direct" && route2 == "" -> "direct"
+                            else -> ""
+                        },
+                        if (route1 == "" || (route1 == "direct" && route2 == "")) emptyList()
+                        else listOf(route1) + listOfNotNull(route2.takeIf { it.isNotEmpty() && it != route1 })
                     ) { errMsg ->
                         saving = false
                         if (errMsg != null) {
