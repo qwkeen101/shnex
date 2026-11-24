@@ -13,9 +13,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -107,6 +109,7 @@ import dev.shnex.app.terminal.rememberTerminalImeController
 import dev.shnex.app.ui.AppearanceScreen
 import dev.shnex.app.ui.BottomNavTab
 import dev.shnex.app.ui.NativeMarkdownDocumentView
+import dev.shnex.app.ui.TopTab
 import dev.shnex.app.ui.WorkbenchViewModel
 
 private val ShnexDarkColors = darkColorScheme(
@@ -136,6 +139,12 @@ class MainActivity : ComponentActivity() {
                 ShnexMobileWorkbench(vm)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // conversations may have been added, renamed or ended on another device
+        vm.refreshAllRemoteTmux()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -379,7 +388,7 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
     vm.passwordPromptHost?.let { targetHost ->
         var pw by remember { mutableStateOf("") }
         AlertDialog(
-            onDismissRequest = { vm.passwordPromptHost = null },
+            onDismissRequest = { vm.dismissPasswordPrompt() },
             title = { Text("输入 SSH 密码 (${targetHost.name})", fontSize = 16.sp) },
             text = {
                 OutlinedTextField(
@@ -391,12 +400,12 @@ fun ShnexMobileWorkbench(vm: WorkbenchViewModel) {
                 )
             },
             confirmButton = {
-                Button(onClick = { vm.connectHost(targetHost, passwordOverride = pw) }) {
+                Button(onClick = { vm.submitPassword(targetHost, pw) }) {
                     Text("连接")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { vm.passwordPromptHost = null }) {
+                TextButton(onClick = { vm.dismissPasswordPrompt() }) {
                     Text("取消")
                 }
             }
@@ -742,6 +751,53 @@ private fun SessionsScreen(
         }
     }
 
+    // Refresh the remote conversation list whenever the sessions page is shown.
+    LaunchedEffect(Unit) { vm.refreshAllRemoteTmux() }
+
+    // Rename a conversation (long press on its chip): hostId, tmuxId, current title
+    var renameTarget by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    renameTarget?.let { (hostId, tmuxId, oldTitle) ->
+        var text by remember(hostId, tmuxId) { mutableStateOf(oldTitle) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("重命名对话", fontSize = 16.sp) },
+            text = {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(40) },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    renameTarget = null
+                    if (text.isNotBlank() && text.trim() != oldTitle) {
+                        vm.renameRemoteSession(hostId, tmuxId, text)
+                    }
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // Ending a conversation that is running something needs one confirmation.
+    vm.pendingEnd?.let { p ->
+        AlertDialog(
+            onDismissRequest = { vm.pendingEnd = null },
+            text = { Text("「${p.title}」正在运行 ${p.command}，确定结束？", fontSize = 14.sp) },
+            confirmButton = {
+                TextButton(onClick = { vm.confirmEndRemoteSession() }) {
+                    Text("结束对话", color = Color(0xFFF87171))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { vm.pendingEnd = null }) { Text("取消") }
+            }
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // 1. Top Compact Session Switcher Chips + RTT + Upload Image + SFTP
         Row(
@@ -759,46 +815,52 @@ private fun SessionsScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                for (t in vm.tabs) {
-                    val selected = t.tabId == active.tabId
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(if (selected) Color(0xFF2B2F3C) else Color.Transparent)
-                            .border(
-                                1.dp,
-                                if (selected) Color(0xFF3B82F6) else Color(0xFF2C2F3A),
-                                RoundedCornerShape(999.dp)
-                            )
-                            .clickable { vm.activeTabId = t.tabId }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (t.isMarkdown) {
-                            Text(
-                                "M↓ ",
-                                color = Color(0xFF93C5FD),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
+                for (item in vm.topTabs()) {
+                    when (item) {
+                        is TopTab.Ghost -> SessionChip(
+                            title = item.remote.title,
+                            selected = false,
+                            dim = true,
+                            markdown = false,
+                            onClick = { vm.switchToRemoteSession(item.hostId, item.remote) },
+                            onLongClick = {
+                                renameTarget = Triple(item.hostId, item.remote.id, item.remote.title)
+                            },
+                            onClose = { vm.requestEndRemoteSession(item.hostId, item.remote.id) }
+                        )
+                        is TopTab.Live -> {
+                            val t = item.tab
+                            val hostId = t.hostId
+                            val tmuxId = t.tmuxId
+                            val title = item.remote?.title ?: t.title
+                            SessionChip(
+                                title = title,
+                                selected = t.tabId == active.tabId,
+                                dim = tmuxId != null && !t.connected,
+                                markdown = t.isMarkdown,
+                                onClick = { vm.selectTab(t) },
+                                onLongClick = if (hostId != null && tmuxId != null) {
+                                    { renameTarget = Triple(hostId, tmuxId, title) }
+                                } else {
+                                    null
+                                },
+                                onClose = { vm.closeTab(t) }
                             )
                         }
-                        Text(
-                            text = t.title,
-                            color = if (selected) Color.White else Color(0xFF9CA3AF),
-                            fontSize = 12.sp,
-                            maxLines = 1
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "关闭",
-                            tint = Color(0xFF8B909A),
-                            modifier = Modifier
-                                .size(13.dp)
-                                .clickable { vm.closeTab(t) }
-                        )
                     }
+                }
+                val activeHostId = active.hostId
+                if (active.tmuxId != null && activeHostId != null) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "新建对话",
+                        tint = Color(0xFF9CA3AF),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .clickable { vm.createAndAttachRemoteSession(activeHostId) }
+                            .padding(3.dp)
+                    )
                 }
             }
 
@@ -976,6 +1038,62 @@ private fun SessionsScreen(
                 }
             }
         }
+    }
+}
+
+/** A chip of the session tab strip. Dim = a conversation not attached on this device. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SessionChip(
+    title: String,
+    selected: Boolean,
+    dim: Boolean,
+    markdown: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    onClose: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) Color(0xFF2B2F3C) else Color.Transparent)
+            .border(
+                1.dp,
+                if (selected) Color(0xFF3B82F6) else Color(0xFF2C2F3A),
+                RoundedCornerShape(999.dp)
+            )
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (markdown) {
+            Text(
+                "M↓ ",
+                color = Color(0xFF93C5FD),
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Text(
+            text = title,
+            color = when {
+                selected -> Color.White
+                dim -> Color(0xFF5D626D)
+                else -> Color(0xFF9CA3AF)
+            },
+            fontSize = 12.sp,
+            maxLines = 1
+        )
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            Icons.Default.Close,
+            contentDescription = "关闭",
+            tint = if (dim) Color(0xFF5D626D) else Color(0xFF8B909A),
+            modifier = Modifier
+                .size(13.dp)
+                .clickable { onClose() }
+        )
     }
 }
 

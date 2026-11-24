@@ -36,7 +36,25 @@ data class SessionInfo(
     val id: String,
     val protocol: String,
     val target: String,
-    val user: String
+    val user: String,
+    val relayMode: String = "",
+    val workspaceName: String = ""
+)
+
+/** A conversation on the remote host (a tmux session), shared with the desktop app. */
+data class RemoteTmuxSession(
+    val id: String,
+    val title: String,
+    val command: String,
+    val busy: Boolean,
+    val path: String,
+    val attachedClients: Int,
+    val createdUnix: Long
+)
+
+data class RemoteTmuxList(
+    val available: Boolean,
+    val sessions: List<RemoteTmuxSession>
 )
 
 data class RemoteFileEntry(
@@ -123,6 +141,7 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
         when (method) {
             "POST" -> builder.post(reqBody ?: "{}".toRequestBody(jsonMedia))
             "PUT" -> builder.put(reqBody ?: "{}".toRequestBody(jsonMedia))
+            "PATCH" -> builder.patch(reqBody ?: "{}".toRequestBody(jsonMedia))
             "DELETE" -> if (reqBody != null) builder.delete(reqBody) else builder.delete()
             else -> builder.get()
         }
@@ -247,10 +266,21 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
         user: String? = null,
         password: String? = null,
         cols: Int = 80,
-        rows: Int = 28
+        rows: Int = 28,
+        tmuxSession: String? = null
     ): SessionInfo {
         val body = JSONObject().apply {
             if (!hostId.isNullOrBlank()) put("host_id", hostId)
+            if (!tmuxSession.isNullOrBlank()) {
+                // attach to an existing conversation only; 410 TMUX_SESSION_GONE if it was ended
+                put(
+                    "relay",
+                    JSONObject()
+                        .put("mode", "tmux")
+                        .put("session_name", tmuxSession)
+                        .put("must_exist", true)
+                )
+            }
             if (!target.isNullOrBlank()) put("target", target)
             if (!user.isNullOrBlank()) put("user", user)
             put("cols", cols)
@@ -273,8 +303,48 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
             id = res.optString("id"),
             protocol = res.optString("protocol", "ssh"),
             target = res.optString("target"),
-            user = res.optString("user")
+            user = res.optString("user"),
+            relayMode = res.optString("relay_mode"),
+            workspaceName = res.optString("workspace_name")
         )
+    }
+
+    private fun parseTmuxSession(o: JSONObject): RemoteTmuxSession {
+        val id = o.optString("id")
+        return RemoteTmuxSession(
+            id = id,
+            title = o.optString("title").ifBlank { id },
+            command = o.optString("command"),
+            busy = o.optBoolean("busy", false),
+            path = o.optString("path"),
+            attachedClients = o.optInt("attached_clients", 0),
+            createdUnix = o.optLong("created_unix", 0L)
+        )
+    }
+
+    suspend fun listTmux(sessionId: String): RemoteTmuxList {
+        val res = requestJson("/api/v1/sessions/$sessionId/tmux")
+        val arr = res.optJSONArray("sessions")
+        val sessions = buildList {
+            if (arr != null) {
+                for (i in 0 until arr.length()) add(parseTmuxSession(arr.getJSONObject(i)))
+            }
+        }
+        return RemoteTmuxList(res.optBoolean("available", false), sessions)
+    }
+
+    suspend fun createTmux(sessionId: String, title: String? = null): RemoteTmuxSession {
+        val body = JSONObject().apply { if (!title.isNullOrBlank()) put("title", title) }
+        return parseTmuxSession(requestJson("/api/v1/sessions/$sessionId/tmux", "POST", body))
+    }
+
+    suspend fun renameTmux(sessionId: String, name: String, title: String): String {
+        val res = requestJson("/api/v1/sessions/$sessionId/tmux/$name", "PATCH", JSONObject().put("title", title))
+        return res.optString("title", title)
+    }
+
+    suspend fun killTmux(sessionId: String, name: String) {
+        requestJson("/api/v1/sessions/$sessionId/tmux/$name", "DELETE")
     }
 
     suspend fun deleteSession(sessionId: String) {

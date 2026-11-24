@@ -18,6 +18,8 @@ import dev.shnex.app.data.CompletionItem
 import dev.shnex.app.data.CoreApiClient
 import dev.shnex.app.data.HostItem
 import dev.shnex.app.data.RemoteFileEntry
+import dev.shnex.app.data.RemoteTmuxSession
+import dev.shnex.app.data.SessionInfo
 import dev.shnex.app.data.SessionSocketHandle
 import dev.shnex.app.data.TailnetPeer
 import dev.shnex.app.data.TailnetStatusInfo
@@ -45,11 +47,14 @@ class LiveTerminalTab(
     val isMarkdown: Boolean = false,
     val sessionId: String = "",
     val hostId: String? = null,
-    val title: String,
+    title: String,
     val subtitle: String,
     val buffer: AnsiTerminalBuffer = AnsiTerminalBuffer(80, 28),
-    val markdownDoc: CompiledMarkdownDoc? = null
+    val markdownDoc: CompiledMarkdownDoc? = null,
+    /** Remote tmux session (conversation) this tab is attached to; only for tmux hosts. */
+    val tmuxId: String? = null
 ) {
+    var title by mutableStateOf(title)
     var socket: SessionSocketHandle? = null
     var renderTick by mutableLongStateOf(0L)
     var rttMs by mutableStateOf<Int?>(null)
@@ -63,6 +68,21 @@ class LiveTerminalTab(
 }
 
 enum class BottomNavTab { HOSTS, SESSIONS, SETTINGS }
+
+/** One chip of the session tab strip. A tmux host's chips are its remote conversations. */
+sealed class TopTab {
+    data class Live(val tab: LiveTerminalTab, val remote: RemoteTmuxSession?) : TopTab()
+    data class Ghost(val hostId: String, val remote: RemoteTmuxSession) : TopTab()
+}
+
+data class PendingEndConversation(
+    val hostId: String,
+    val tmuxId: String,
+    val title: String,
+    val command: String
+)
+
+private val TMUX_ID = Regex("^[A-Za-z0-9_-]{1,48}$")
 
 class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -159,6 +179,15 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
 
     // Password fallback prompt when auth_mode == "auto" needs interactive password
     var passwordPromptHost by mutableStateOf<HostItem?>(null)
+    // What the password prompt retries instead of connectHost (e.g. attaching a conversation)
+    private var passwordRetry: ((String) -> Unit)? = null
+    // Passwords typed during this run, memory only, so further conversations of the host do not prompt again
+    private val hostPasswords = mutableMapOf<String, String>()
+
+    // Remote tmux conversations of tmux hosts, keyed by hostId
+    val remoteTmux = mutableStateMapOf<String, List<RemoteTmuxSession>>()
+    var pendingEnd by mutableStateOf<PendingEndConversation?>(null)
+    private val attachingTmux = mutableSetOf<String>()
 
     // SFTP Sheet State
     var showSftpSheet by mutableStateOf(false)
@@ -330,12 +359,32 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun submitPassword(host: HostItem, password: String) {
+        val retry = passwordRetry
+        if (retry != null) {
+            passwordRetry = null
+            passwordPromptHost = null
+            retry(password)
+        } else {
+            connectHost(host, passwordOverride = password)
+        }
+    }
+
+    fun dismissPasswordPrompt() {
+        passwordPromptHost = null
+        passwordRetry = null
+    }
+
     fun connectHost(host: HostItem, passwordOverride: String? = null, openSftpAfter: Boolean = false) {
-        val existing = tabs.firstOrNull { !it.isMarkdown && it.hostId == host.id && it.connected }
+        // A tmux host is represented by its conversation tabs (connected or not): focus instead of duplicating.
+        val existing = tabs.firstOrNull {
+            !it.isMarkdown && it.hostId == host.id && (it.connected || it.tmuxId != null)
+        }
         if (existing != null && passwordOverride == null) {
-            activeTabId = existing.tabId
+            selectTab(existing)
             currentNav = BottomNavTab.SESSIONS
-            if (openSftpAfter) openSftpForActiveSession()
+            if (openSftpAfter && existing.connected) openSftpForActiveSession()
+            refreshRemoteTmux(host.id)
             return
         }
 
@@ -345,23 +394,37 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val sess = client.createSession(
                     hostId = host.id,
-                    password = passwordOverride,
+                    password = passwordOverride ?: hostPasswords[host.id],
                     cols = 80,
                     rows = 28
                 )
+                if (passwordOverride != null) hostPasswords[host.id] = passwordOverride
                 passwordPromptHost = null
+                val tmux = detectTmux(client, sess)
+                if (tmux != null) {
+                    remoteTmux[host.id] = tmux.second
+                    viewModelScope.launch {
+                        // the relay may create the default session just after connecting
+                        delay(2000)
+                        refreshRemoteTmux(host.id)
+                    }
+                }
                 attachNewSessionTab(
                     client = client,
                     sessionId = sess.id,
                     hostId = host.id,
-                    title = host.name,
-                    subtitle = "${host.user}@${host.host}"
+                    title = tmux?.let { (id, list) -> list.firstOrNull { it.id == id }?.title ?: id } ?: host.name,
+                    subtitle = "${host.user}@${host.host}",
+                    tmuxId = tmux?.first,
+                    replace = tmux?.let { (id, _) -> tabs.firstOrNull { it.hostId == host.id && it.tmuxId == id } }
                 )
                 if (openSftpAfter) {
                     openSftpForActiveSession()
                 }
             } catch (e: ApiException) {
                 if (e.code == "AUTH_PASSWORD_NEEDED") {
+                    hostPasswords.remove(host.id)
+                    passwordRetry = null
                     passwordPromptHost = host
                 } else {
                     showToast("连接失败: ${e.message}")
@@ -411,7 +474,9 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         sessionId: String,
         hostId: String?,
         title: String,
-        subtitle: String
+        subtitle: String,
+        tmuxId: String? = null,
+        replace: LiveTerminalTab? = null
     ) {
         val tab = LiveTerminalTab(
             tabId = "tab-${UUID.randomUUID()}",
@@ -419,7 +484,8 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
             sessionId = sessionId,
             hostId = hostId,
             title = title,
-            subtitle = subtitle
+            subtitle = subtitle,
+            tmuxId = tmuxId
         )
         val sock = client.openSessionWebSocket(
             sessionId = sessionId,
@@ -433,9 +499,245 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
             onDisconnected = { tab.connected = false }
         )
         tab.socket = sock
-        tabs.add(tab)
+        val idx = replace?.let { tabs.indexOf(it) } ?: -1
+        if (idx >= 0) {
+            replace?.socket?.close()
+            tabs[idx] = tab
+        } else {
+            tabs.add(tab)
+        }
         activeTabId = tab.tabId
         currentNav = BottomNavTab.SESSIONS
+    }
+
+    // ---- Remote tmux conversations (shared with desktop) ----
+
+    private suspend fun detectTmux(
+        client: CoreApiClient,
+        sess: SessionInfo
+    ): Pair<String, List<RemoteTmuxSession>>? {
+        val ws = sess.workspaceName
+        if ((sess.relayMode != "tmux" && sess.relayMode != "auto") || !TMUX_ID.matches(ws)) return null
+        val list = runCatching { client.listTmux(sess.id) }.getOrNull() ?: return null
+        return if (list.available) ws to list.sessions else null
+    }
+
+    /** Any connected tab of the tmux host can run the tmux API; prefer one other than [avoid]. */
+    private fun tmuxControlSession(hostId: String, avoid: LiveTerminalTab? = null): String? {
+        val hostTabs = tabs.filter { it.hostId == hostId && it.tmuxId != null && it.connected }
+        return (hostTabs.firstOrNull { it !== avoid } ?: hostTabs.firstOrNull())?.sessionId
+    }
+
+    fun refreshRemoteTmux(hostId: String) {
+        val client = apiClient ?: return
+        val sid = tmuxControlSession(hostId) ?: return
+        viewModelScope.launch {
+            val list = runCatching { client.listTmux(sid) }.getOrNull() ?: return@launch
+            if (list.available) remoteTmux[hostId] = list.sessions
+        }
+    }
+
+    /** Called when the sessions page shows and when the app returns to the foreground. */
+    fun refreshAllRemoteTmux() {
+        tabs.mapNotNull { t -> t.hostId.takeIf { t.tmuxId != null } }.distinct().forEach { refreshRemoteTmux(it) }
+    }
+
+    /** Display order of a tmux host's conversations: remote list (by creation), then attached tabs not listed yet. */
+    private fun tmuxGroupIds(hostId: String): List<String> {
+        val ids = (remoteTmux[hostId] ?: emptyList()).map { it.id }.toMutableList()
+        for (t in tabs) {
+            val id = t.tmuxId
+            if (t.hostId == hostId && id != null && id !in ids) ids.add(id)
+        }
+        return ids
+    }
+
+    fun topTabs(): List<TopTab> {
+        val out = mutableListOf<TopTab>()
+        val doneHosts = mutableSetOf<String>()
+        for (tab in tabs) {
+            val hostId = tab.hostId
+            if (tab.tmuxId == null || hostId == null) {
+                out.add(TopTab.Live(tab, null))
+                continue
+            }
+            if (!doneHosts.add(hostId)) continue
+            val hostTabs = tabs.filter { it.hostId == hostId && it.tmuxId != null }
+            val remote = remoteTmux[hostId] ?: emptyList()
+            for (r in remote) {
+                val attached = hostTabs.firstOrNull { it.tmuxId == r.id }
+                out.add(if (attached != null) TopTab.Live(attached, r) else TopTab.Ghost(hostId, r))
+            }
+            for (t in hostTabs) {
+                if (remote.none { it.id == t.tmuxId }) out.add(TopTab.Live(t, null))
+            }
+        }
+        return out
+    }
+
+    /** Tapping a chip: a disconnected conversation re-attaches (only if it still exists). */
+    fun selectTab(tab: LiveTerminalTab) {
+        activeTabId = tab.tabId
+        val hostId = tab.hostId
+        val tmuxId = tab.tmuxId
+        if (!tab.connected && hostId != null && tmuxId != null) {
+            attachTmux(hostId, tmuxId, tab.title, tab, null)
+        }
+    }
+
+    fun switchToRemoteSession(hostId: String, remote: RemoteTmuxSession) {
+        val existing = tabs.firstOrNull { it.hostId == hostId && it.tmuxId == remote.id }
+        if (existing != null) {
+            selectTab(existing)
+            return
+        }
+        attachTmux(hostId, remote.id, remote.title, null, null)
+    }
+
+    private fun attachTmux(
+        hostId: String,
+        tmuxId: String,
+        title: String,
+        replace: LiveTerminalTab?,
+        password: String?
+    ) {
+        val client = apiClient ?: return
+        val host = hosts.firstOrNull { it.id == hostId } ?: return
+        val key = "$hostId/$tmuxId"
+        if (!attachingTmux.add(key)) return
+        viewModelScope.launch {
+            try {
+                replace?.let { old -> client.deleteSession(old.sessionId) }
+                val sess = client.createSession(
+                    hostId = hostId,
+                    password = password ?: hostPasswords[hostId],
+                    cols = 80,
+                    rows = 28,
+                    tmuxSession = tmuxId
+                )
+                if (password != null) hostPasswords[hostId] = password
+                attachNewSessionTab(
+                    client = client,
+                    sessionId = sess.id,
+                    hostId = hostId,
+                    title = title,
+                    subtitle = "${host.user}@${host.host}",
+                    tmuxId = tmuxId,
+                    replace = replace
+                )
+            } catch (e: ApiException) {
+                when (e.code) {
+                    "TMUX_SESSION_GONE" -> {
+                        // ended on another device: drop it instead of resurrecting an empty conversation
+                        replace?.let { removeTabLocally(it) }
+                        remoteTmux[hostId] = (remoteTmux[hostId] ?: emptyList()).filter { it.id != tmuxId }
+                        showToast("「$title」已在其他设备结束")
+                        refreshRemoteTmux(hostId)
+                    }
+                    "AUTH_PASSWORD_NEEDED" -> {
+                        hostPasswords.remove(hostId)
+                        passwordRetry = { pw -> attachTmux(hostId, tmuxId, title, replace, pw) }
+                        passwordPromptHost = host
+                    }
+                    else -> showToast("打开对话失败: ${e.message}")
+                }
+            } catch (t: Throwable) {
+                showToast("打开对话异常: ${t.message}")
+            } finally {
+                attachingTmux.remove(key)
+            }
+        }
+    }
+
+    /** "+" on a tmux host: create a conversation on the remote host and attach to it. */
+    fun createAndAttachRemoteSession(hostId: String) {
+        val client = apiClient ?: return
+        val sid = tmuxControlSession(hostId) ?: run {
+            showToast("请先重新连接该主机")
+            return
+        }
+        viewModelScope.launch {
+            runCatching { client.createTmux(sid) }
+                .onSuccess { created ->
+                    remoteTmux[hostId] = (remoteTmux[hostId] ?: emptyList()).filter { it.id != created.id } + created
+                    attachTmux(hostId, created.id, created.title, null, null)
+                }
+                .onFailure { e -> showToast("新建对话失败: ${e.message}") }
+        }
+    }
+
+    fun renameRemoteSession(hostId: String, tmuxId: String, title: String) {
+        val client = apiClient ?: return
+        val clean = title.trim()
+        if (clean.isEmpty()) return
+        val sid = tmuxControlSession(hostId) ?: return
+        viewModelScope.launch {
+            runCatching { client.renameTmux(sid, tmuxId, clean) }
+                .onSuccess { newTitle ->
+                    remoteTmux[hostId] = (remoteTmux[hostId] ?: emptyList()).map {
+                        if (it.id == tmuxId) it.copy(title = newTitle) else it
+                    }
+                    tabs.filter { it.hostId == hostId && it.tmuxId == tmuxId }.forEach { it.title = newTitle }
+                }
+                .onFailure { e -> showToast("改名失败: ${e.message}") }
+            refreshRemoteTmux(hostId)
+        }
+    }
+
+    /** "×" on a conversation: ends it on the remote host, confirming first when something is running. */
+    fun requestEndRemoteSession(hostId: String, tmuxId: String) {
+        val client = apiClient ?: return
+        val tab = tabs.firstOrNull { it.hostId == hostId && it.tmuxId == tmuxId }
+        val sid = tmuxControlSession(hostId, tab) ?: run {
+            // no live connection to ask through: just drop the local view
+            tab?.let { removeTabLocally(it) }
+            return
+        }
+        viewModelScope.launch {
+            val fresh = runCatching { client.listTmux(sid) }.getOrNull()
+            val info = fresh?.sessions?.firstOrNull { it.id == tmuxId }
+                ?: remoteTmux[hostId]?.firstOrNull { it.id == tmuxId }
+            if (info?.busy == true) {
+                pendingEnd = PendingEndConversation(hostId, tmuxId, info.title, info.command)
+            } else {
+                endRemoteSession(hostId, tmuxId)
+            }
+        }
+    }
+
+    fun confirmEndRemoteSession() {
+        val p = pendingEnd ?: return
+        pendingEnd = null
+        endRemoteSession(p.hostId, p.tmuxId)
+    }
+
+    private fun endRemoteSession(hostId: String, tmuxId: String) {
+        val client = apiClient ?: return
+        val tab = tabs.firstOrNull { it.hostId == hostId && it.tmuxId == tmuxId }
+        val sid = tmuxControlSession(hostId, tab) ?: return
+        val order = tmuxGroupIds(hostId)
+        val idx = order.indexOf(tmuxId)
+        val rest = order.filter { it != tmuxId }
+        val nextId = if (rest.isEmpty()) null else rest[idx.coerceIn(0, rest.size - 1)]
+        val nextRemote = remoteTmux[hostId]?.firstOrNull { it.id == nextId }
+        val wasActive = tab != null && activeTab?.tabId == tab.tabId
+        val hostHasOtherTab = tabs.any { it.hostId == hostId && it.tmuxId != null && it.tmuxId != tmuxId }
+        viewModelScope.launch {
+            // killing the session this connection is attached to may drop the response; the refreshed list decides
+            runCatching { client.killTmux(sid, tmuxId) }
+            tab?.let { removeTabLocally(it) }
+            remoteTmux[hostId] = (remoteTmux[hostId] ?: emptyList()).filter { it.id != tmuxId }
+            if (nextId != null && (wasActive || !hostHasOtherTab)) {
+                val nextTab = tabs.firstOrNull { it.hostId == hostId && it.tmuxId == nextId }
+                if (nextTab != null) {
+                    selectTab(nextTab)
+                } else if (nextRemote != null) {
+                    attachTmux(hostId, nextRemote.id, nextRemote.title, null, null)
+                }
+            }
+            delay(800)
+            refreshRemoteTmux(hostId)
+        }
     }
 
     fun jumpToSessionById(sessionId: String) {
@@ -445,6 +747,16 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun closeTab(tab: LiveTerminalTab) {
+        val hostId = tab.hostId
+        val tmuxId = tab.tmuxId
+        if (hostId != null && tmuxId != null) {
+            requestEndRemoteSession(hostId, tmuxId)
+            return
+        }
+        removeTabLocally(tab)
+    }
+
+    private fun removeTabLocally(tab: LiveTerminalTab) {
         tab.socket?.close()
         if (!tab.isMarkdown && tab.sessionId.isNotBlank()) {
             val client = apiClient
