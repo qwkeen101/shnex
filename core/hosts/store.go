@@ -22,6 +22,40 @@ import (
 type RouteProfile struct {
 	UseTSNet bool   `json:"use_tsnet,omitempty"`
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyIDs are the ordered routes (pool proxy ids or "direct"): [0] primary, [1] backup.
+	// Ignored when UseTSNet is set; takes precedence over the legacy ProxyURL.
+	ProxyIDs []string `json:"proxy_ids,omitempty"`
+}
+
+// MaxRouteProxies is how many routes a host may race (primary + backup).
+const MaxRouteProxies = 2
+
+// NormalizeProxyIDs trims, drops empties and duplicates, and keeps at most MaxRouteProxies.
+func NormalizeProxyIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		dup := false
+		for _, o := range out {
+			if o == id {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, id)
+		}
+		if len(out) == MaxRouteProxies {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // HostProfile represents a saved server entry in the Left Host Tree.
@@ -279,7 +313,7 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput) (HostProfile, error)
 		Favorite:         favVal,
 		LastConnectedAt:  existing.LastConnectedAt,
 		HostKey:          in.HostKey,
-		Route:            in.Route,
+		Route:            RouteProfile{UseTSNet: in.Route.UseTSNet, ProxyURL: strings.TrimSpace(in.Route.ProxyURL), ProxyIDs: NormalizeProxyIDs(in.Route.ProxyIDs)},
 		Relay:            in.Relay,
 		UpdatedAt:        time.Now(),
 	}

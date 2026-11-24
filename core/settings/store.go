@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -597,6 +600,10 @@ func (s *Store) UpsertProxy(ctx context.Context, p ProxyEntry, password string) 
 		replaced := false
 		for i := range cur.Proxies {
 			if cur.Proxies[i].ID == p.ID {
+				if password == "" {
+					// editing without retyping the password keeps the stored one
+					p.SecretRef, p.HasSecret = cur.Proxies[i].SecretRef, cur.Proxies[i].HasSecret
+				}
 				cur.Proxies[i] = p
 				replaced = true
 				break
@@ -606,6 +613,70 @@ func (s *Store) UpsertProxy(ctx context.Context, p ProxyEntry, password string) 
 			cur.Proxies = append(cur.Proxies, p)
 		}
 	})
+}
+
+// ProxyByID returns a pool proxy and its URL including credentials, for dialing only;
+// the URL must never be logged or returned to clients.
+func (s *Store) ProxyByID(ctx context.Context, id string) (ProxyEntry, string, error) {
+	var entry *ProxyEntry
+	for _, p := range s.Get().Proxies {
+		if p.ID == id {
+			p := p
+			entry = &p
+			break
+		}
+	}
+	if entry == nil {
+		return ProxyEntry{}, "", fmt.Errorf("settings: proxy %q has been deleted", id)
+	}
+	u := url.URL{Scheme: entry.Scheme, Host: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port))}
+	password := ""
+	if entry.HasSecret && entry.SecretRef != "" && s.bridge != nil {
+		password, _ = s.bridge.GetSecret(ctx, entry.SecretRef)
+	}
+	switch {
+	case entry.Username != "" && password != "":
+		u.User = url.UserPassword(entry.Username, password)
+	case entry.Username != "":
+		u.User = url.User(entry.Username)
+	}
+	return *entry, u.String(), nil
+}
+
+// ParseProxyLink turns one pasted line such as "socks5://user:pass@host:1080#香港" into a
+// pool entry and its password. Only SOCKS5 / HTTP(S) proxies for now.
+func ParseProxyLink(line string) (ProxyEntry, string, error) {
+	u, err := url.Parse(strings.TrimSpace(line))
+	if err != nil {
+		return ProxyEntry{}, "", errors.New("不是有效的链接")
+	}
+	if u.Scheme == "" {
+		return ProxyEntry{}, "", errors.New("不是有效的链接")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "socks5", "socks5h", "socks":
+		scheme = "socks5"
+	case "http", "https":
+	default:
+		return ProxyEntry{}, "", fmt.Errorf("暂不支持 %s:// 链接（目前只支持 socks5 / http）", u.Scheme)
+	}
+	host := u.Hostname()
+	port, err := strconv.Atoi(u.Port())
+	if host == "" || err != nil || port <= 0 || port > 65535 {
+		return ProxyEntry{}, "", errors.New("缺少地址或端口")
+	}
+	name := strings.TrimSpace(u.Fragment)
+	if name == "" {
+		name = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	p := ProxyEntry{Name: name, Scheme: scheme, Host: host, Port: port}
+	password := ""
+	if u.User != nil {
+		p.Username = u.User.Username()
+		password, _ = u.User.Password()
+	}
+	return p, password, nil
 }
 
 func (s *Store) DeleteProxy(id string) (AppSettings, error) {

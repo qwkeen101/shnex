@@ -421,8 +421,67 @@ func (s *Server) handleUpsertProxy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
+// POST /api/v1/settings/proxies/import  {"text": "one link per line"}
+// Pasting is the import: whichever links the user copied are the ones kept.
+func (s *Server) handleImportProxies(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	type lineError struct {
+		Line  int    `json:"line"`
+		Error string `json:"error"`
+	}
+	errs := []lineError{}
+	imported := 0
+	updated := s.settingsStore.Get()
+	for i, raw := range strings.Split(body.Text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entry, password, err := settings.ParseProxyLink(line)
+		if err == nil {
+			updated, err = s.settingsStore.UpsertProxy(r.Context(), entry, password)
+		}
+		if err != nil {
+			// report the line number only: the line may contain a password
+			errs = append(errs, lineError{Line: i + 1, Error: err.Error()})
+			continue
+		}
+		imported++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"settings": updated, "imported": imported, "errors": errs})
+}
+
 func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// A proxy a host still routes through cannot disappear under it.
+	var users []string
+	for _, hp := range s.hostStore.List() {
+		for _, pid := range hp.Route.ProxyIDs {
+			if pid == id {
+				users = append(users, hp.Name)
+				break
+			}
+		}
+	}
+	if len(users) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "以下主机正在使用这个代理，请先在主机里换掉：" + strings.Join(users, "、"),
+			"code":  "PROXY_IN_USE",
+			"hosts": users,
+		})
+		return
+	}
+	for _, p := range s.settingsStore.Get().Proxies {
+		if p.ID == id && p.SecretRef != "" && s.bridge != nil {
+			_ = s.bridge.SetSecret(r.Context(), p.SecretRef, "") // best effort: bridges have no delete
+		}
+	}
 	updated, err := s.settingsStore.DeleteProxy(id)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())

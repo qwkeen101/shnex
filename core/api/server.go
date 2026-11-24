@@ -353,6 +353,7 @@ func (s *Server) buildMux() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/settings/credentials/{id}", s.requireBearer(s.handleDeleteCredential))
 	mux.HandleFunc("POST /api/v1/settings/proxies", s.requireBearer(s.handleUpsertProxy))
 	mux.HandleFunc("DELETE /api/v1/settings/proxies/{id}", s.requireBearer(s.handleDeleteProxy))
+	mux.HandleFunc("POST /api/v1/settings/proxies/import", s.requireBearer(s.handleImportProxies))
 	mux.HandleFunc("GET /api/v1/settings/backup/export", s.requireBearer(s.handleBackupExport))
 	mux.HandleFunc("POST /api/v1/settings/backup/import", s.requireBearer(s.handleBackupImport))
 
@@ -497,6 +498,7 @@ type JumpHostDTO struct {
 type RouteDTO struct {
 	UseTSNet  bool          `json:"use_tsnet,omitempty"`
 	ProxyURL  string        `json:"proxy_url,omitempty"` // e.g. socks5://127.0.0.1:1080 or http://127.0.0.1:7890
+	ProxyIDs  []string      `json:"proxy_ids,omitempty"` // ordered pool proxy ids or "direct", raced primary-first
 	JumpHosts []JumpHostDTO `json:"jump_hosts,omitempty"`
 }
 
@@ -549,6 +551,9 @@ type SessionSummary struct {
 	AttachedClients int32                  `json:"attached_clients"`
 	LastRTTMicros   int64                  `json:"last_rtt_micros,omitempty"`
 	Closed          bool                   `json:"closed"`
+	// RouteVia names the proxy route actually used; RouteFallback is set when it was not ①.
+	RouteVia      string `json:"route_via,omitempty"`
+	RouteFallback bool   `json:"route_fallback,omitempty"`
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
@@ -665,6 +670,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notifyApproval := req.NotifyOnApproval || req.NotifyOnIdle
+	var routeVia string
+	var routeFallback bool
+	if rd, ok := d.(*dialer.RaceDialer); ok {
+		if win, fb, ok := rd.Winner(); ok {
+			routeVia, routeFallback = win.Name, fb
+		}
+	}
+
 	ms := newManagedSession(sess, req.User, req.Relay, size, s.bridge, logWriter, compInsp, req.NotifyOnBell, notifyApproval, func(id string) {
 		s.mu.Lock()
 		delete(s.sessions, id)
@@ -675,9 +688,44 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.sessions[sess.ID()] = ms
 	s.mu.Unlock()
 
+	ms.routeVia, ms.routeFallback = routeVia, routeFallback
 	ms.start()
 	writeJSON(w, http.StatusCreated, ms.summary())
 }
+
+// buildRaceDialer turns a host's ordered proxy_ids into a RaceDialer (primary first,
+// backup started after a short stagger or as soon as the primary fails).
+func (s *Server) buildRaceDialer(ctx context.Context, req CreateSessionRequest) (*dialer.RaceDialer, error) {
+	ids := hosts.NormalizeProxyIDs(req.Route.ProxyIDs)
+	cands := make([]dialer.RaceCandidate, 0, len(ids))
+	var missing []string
+	for _, id := range ids {
+		if id == routeDirect {
+			cands = append(cands, dialer.RaceCandidate{
+				Key: routeDirect, Name: "直连",
+				Dialer: dialer.NewDirectDialer(15*time.Second, 30*time.Second),
+			})
+			continue
+		}
+		entry, proxyURL, err := s.settingsStore.ProxyByID(ctx, id)
+		if err != nil {
+			missing = append(missing, id)
+			continue
+		}
+		pd, err := dialer.NewProxyDialerFromURL(proxyURL, dialer.NewDirectDialer(15*time.Second, 30*time.Second))
+		if err != nil {
+			return nil, fmt.Errorf("代理「%s」配置无效", entry.Name) // never echo the URL: it may hold a password
+		}
+		cands = append(cands, dialer.RaceCandidate{Key: id, Name: entry.Name, Dialer: pd})
+	}
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("该主机选择的代理已被删除（%s），请重新选择", strings.Join(missing, ", "))
+	}
+	proto := strings.ToLower(strings.TrimSpace(req.Protocol))
+	return dialer.NewRaceDialer(cands, proto == "" || proto == "ssh"), nil
+}
+
+const routeDirect = "direct"
 
 func (s *Server) buildSessionRoute(
 	ctx context.Context,
@@ -704,7 +752,15 @@ func (s *Server) buildSessionRoute(
 
 	proxySpec := strings.TrimSpace(req.Route.ProxyURL)
 	var base dialer.Dialer
-	if req.Route.UseTSNet {
+	if !req.Route.UseTSNet && len(req.Route.ProxyIDs) > 0 {
+		// Tailscale addresses are unreachable through public proxies, so tsnet wins over proxy_ids.
+		rd, err := s.buildRaceDialer(ctx, req)
+		if err != nil {
+			return nil, nil, "", nil, err
+		}
+		base = rd
+		proxySpec = ""
+	} else if req.Route.UseTSNet {
 		tsd, err := s.tailnetMgr.Dialer()
 		if err != nil {
 			return nil, nil, "", nil, err
@@ -923,6 +979,8 @@ type managedSession struct {
 	notifyBell     bool
 	notifyApproval bool
 	onTerminated   func(id string)
+	routeVia       string
+	routeFallback  bool
 
 	scrollback *ringBuffer
 
@@ -1063,6 +1121,8 @@ func (m *managedSession) summary() SessionSummary {
 		AttachedClients: m.attachedCount.Load(),
 		LastRTTMicros:   m.lastRTTMicros.Load(),
 		Closed:          closed,
+		RouteVia:        m.routeVia,
+		RouteFallback:   m.routeFallback,
 	}
 }
 

@@ -1004,6 +1004,9 @@ func (s *Server) applySavedHostProfile(req *CreateSessionRequest) error {
 	if !req.Route.UseTSNet && hp.Route.UseTSNet {
 		req.Route.UseTSNet = true
 	}
+	if len(req.Route.ProxyIDs) == 0 && req.Route.ProxyURL == "" && len(hp.Route.ProxyIDs) > 0 {
+		req.Route.ProxyIDs = append([]string(nil), hp.Route.ProxyIDs...)
+	}
 	if req.Route.ProxyURL == "" && hp.Route.ProxyURL != "" {
 		req.Route.ProxyURL = hp.Route.ProxyURL
 	}
