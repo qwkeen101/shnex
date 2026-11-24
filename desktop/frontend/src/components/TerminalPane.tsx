@@ -107,6 +107,7 @@ export const TerminalPane: React.FC<Props> = ({
   registerSender,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const termInstanceRef = useRef<Terminal | null>(null);
   const fitAddonInstanceRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -926,7 +927,8 @@ export const TerminalPane: React.FC<Props> = ({
           fitAddon.fit();
           syncImeCursorAnchor();
           sendResize(term.cols, term.rows);
-          term.focus();
+          // never steal focus from a rename box, dialog or another pane
+          reclaimFocusRef.current();
           syncImeCursorAnchor();
         } catch {
           // Ignore if unmounted
@@ -1088,29 +1090,72 @@ export const TerminalPane: React.FC<Props> = ({
     themeMode,
   ]);
 
-  // Keep IME cursor anchor synced & restore terminal textarea focus when pane/window regains focus
+  // One rule: while this pane owns the keyboard (focused) and is visible, keyboard focus that is
+  // not in another editable control belongs to xterm. Focus otherwise drops to <body> after
+  // clicking the current tab, finishing a rename, a removed "×" button or a closed dialog,
+  // and the IME composition box then shows up at the window's top-left corner.
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
+  const reclaimFocusRef = useRef<() => void>(() => {});
+  reclaimFocusRef.current = () => {
+    const term = termInstanceRef.current;
+    const root = rootRef.current;
+    if (!focusedRef.current || !term || !root) return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active === term.textarea) {
+      syncImeAnchorFnRef.current();
+      return;
+    }
+    const isOtherEditable =
+      active &&
+      (active.tagName === "INPUT" ||
+        active.tagName === "SELECT" ||
+        active.tagName === "TEXTAREA" ||
+        active.isContentEditable);
+    if (isOtherEditable) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return; // the user is selecting text elsewhere
+    // hidden (inactive tab, settings page) or covered by a dialog: leave focus alone
+    const r = root.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!top || !root.contains(top)) return;
+    term.focus();
+    syncImeAnchorFnRef.current();
+  };
+
   useEffect(() => {
     if (!focused) return;
-    const ensureTerminalFocusAndImeAnchor = () => {
-      const active = document.activeElement as HTMLElement | null;
-      const isOtherEditable =
-        active &&
-        (active.tagName === "INPUT" ||
-          active.tagName === "SELECT" ||
-          (active.tagName === "TEXTAREA" &&
-            !active.classList.contains("xterm-helper-textarea")) ||
-          active.isContentEditable);
-      if (!isOtherEditable) {
-        termInstanceRef.current?.focus();
-      }
-      requestAnimationFrame(() => {
-        syncImeAnchorFnRef.current();
-      });
+    let raf = 0;
+    let pointerDown = false;
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => reclaimFocusRef.current());
     };
-    ensureTerminalFocusAndImeAnchor();
-    window.addEventListener("focus", ensureTerminalFocusAndImeAnchor);
+    const onDown = () => {
+      pointerDown = true;
+    };
+    const onUp = () => {
+      pointerDown = false;
+      schedule(); // after the click handler and its re-render
+    };
+    const onFocusOut = () => {
+      if (!pointerDown) schedule();
+    };
+    reclaimFocusRef.current();
+    schedule(); // once more after layout/fit
+    window.addEventListener("focus", schedule);
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("pointerup", onUp, true);
+    document.addEventListener("focusout", onFocusOut);
+    // Enter/Esc that unmount the focused control (rename box, dialog) fire no reliable blur
+    document.addEventListener("keyup", schedule, true);
     return () => {
-      window.removeEventListener("focus", ensureTerminalFocusAndImeAnchor);
+      cancelAnimationFrame(raf);
+      window.removeEventListener("focus", schedule);
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("pointerup", onUp, true);
+      document.removeEventListener("focusout", onFocusOut);
+      document.removeEventListener("keyup", schedule, true);
     };
   }, [focused]);
 
@@ -1426,6 +1471,7 @@ export const TerminalPane: React.FC<Props> = ({
 
   return (
     <div
+      ref={rootRef}
       onMouseDown={onFocus}
       onContextMenu={handleTerminalContextMenu}
       onPasteCapture={(e) => {
