@@ -60,6 +60,9 @@ class LiveTerminalTab(
     var rttMs by mutableStateOf<Int?>(null)
     var approvalSnippet by mutableStateOf<String?>(null)
     var connected by mutableStateOf(true)
+    /** tmux history shown while scrolled back (tmux keeps it remotely; the local screen has none). */
+    var history by mutableStateOf<AnsiTerminalBuffer?>(null)
+    var historyLoading = false
     private val tickSeq = AtomicLong(0L)
 
     fun bumpRender() {
@@ -573,6 +576,34 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return out
+    }
+
+    /** First scroll-back inside tmux: fetch the remote history once and scroll it locally. */
+    fun loadTmuxHistory(tab: LiveTerminalTab) {
+        val client = apiClient ?: return
+        val tmuxId = tab.tmuxId ?: return
+        if (tab.historyLoading || tab.history != null || !tab.connected) return
+        tab.historyLoading = true
+        viewModelScope.launch {
+            try {
+                val text = client.tmuxHistory(tab.sessionId, tmuxId)
+                val hb = withContext(Dispatchers.Default) {
+                    AnsiTerminalBuffer(tab.buffer.cols, tab.buffer.rows, maxScrollback = 12000).also { b ->
+                        val body = text.removeSuffix("\n").replace("\n", "\r\n")
+                        b.feedBytes(body.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                tab.history = hb
+            } catch (_: Throwable) {
+                // scrolling simply stays at the live screen
+            } finally {
+                tab.historyLoading = false
+            }
+        }
+    }
+
+    fun closeTmuxHistory(tab: LiveTerminalTab) {
+        tab.history = null
     }
 
     /** Tapping a chip: a disconnected conversation re-attaches (only if it still exists). */

@@ -742,7 +742,12 @@ fun TerminalCanvasView(
     onInterceptCtrlLetter: (ch: Char) -> Boolean = { false },
     onTerminalInput: (text: String, useBracketedPaste: Boolean) -> Unit = { _, _ -> },
     onTerminalResize: (cols: Int, rows: Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Inside tmux the live screen is tmux's alternate screen: scrolling back shows the remote
+    // history instead, fetched once per scroll-back (onNeedHistory) and dropped at the bottom.
+    historyBuffer: AnsiTerminalBuffer? = null,
+    onNeedHistory: (() -> Unit)? = null,
+    onHistoryClosed: (() -> Unit)? = null
 ) {
     val density = LocalDensity.current
     // Local copy so pinch-zoom is smooth; persisted once per gesture via onFontSizeChanged.
@@ -762,6 +767,9 @@ fun TerminalCanvasView(
     val latestCtrlCb by rememberUpdatedState(onInterceptCtrlLetter)
     val latestFontCb by rememberUpdatedState(onFontSizeChanged)
     val latestBuffer by rememberUpdatedState(buffer)
+    val latestHistory by rememberUpdatedState(historyBuffer)
+    val latestNeedHistory by rememberUpdatedState(onNeedHistory)
+    val latestHistoryClosed by rememberUpdatedState(onHistoryClosed)
     val internalController = imeController ?: rememberTerminalImeController()
 
     val textPaint = remember {
@@ -792,8 +800,14 @@ fun TerminalCanvasView(
         }
     }
 
-    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText, appearance.lineHeightScale, fonts.primary) {
-        buffer.snapshot(scrollOffset)
+    // Back at the bottom: drop the fetched history so the next scroll-back reads it fresh.
+    LaunchedEffect(scrollOffset == 0) {
+        if (scrollOffset == 0) latestHistoryClosed?.invoke()
+    }
+
+    val snap = remember(renderTick, scrollOffset, fontSp, sizePair, canvasSize, composingText, appearance.lineHeightScale, fonts.primary, historyBuffer) {
+        val hb = historyBuffer
+        if (scrollOffset > 0 && hb != null && buffer.isAltScreen) hb.snapshot(scrollOffset) else buffer.snapshot(scrollOffset)
     }
 
     Box(modifier = modifier.fillMaxSize().background(Color(scheme.bg))) {
@@ -867,7 +881,14 @@ fun TerminalCanvasView(
                                         val deltaLines = (scrollFracPx / rowH).roundToInt()
                                         if (deltaLines != 0) {
                                             scrollFracPx -= deltaLines * rowH
-                                            val curScrollMax = latestBuffer.snapshot(0).scrollbackSize
+                                            val live = latestBuffer
+                                            val curScrollMax = if (live.isAltScreen) {
+                                                val hb = latestHistory
+                                                if (hb == null && deltaLines > 0) latestNeedHistory?.invoke()
+                                                hb?.scrollbackLines ?: 0
+                                            } else {
+                                                live.scrollbackLines
+                                            }
                                             scrollOffset = (scrollOffset + deltaLines).coerceIn(0, curScrollMax)
                                         }
                                         event.changes.forEach { it.consume() }

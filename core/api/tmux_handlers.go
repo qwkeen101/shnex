@@ -31,6 +31,12 @@ type remoteTmuxList struct {
 }
 
 const (
+	// tmux history for scrolling back on clients whose local screen is tmux's alternate screen.
+	tmuxHistoryDefaultLines = 3000
+	tmuxHistoryMaxLines     = 10000
+	// stays below the exec output cap (ssh maxExecOutputBytes = 128 KiB); tail keeps the newest bytes
+	tmuxHistoryMaxBytes = 120 * 1024
+
 	tmuxNoTmuxMarker  = "__NO_TMUX__"
 	maxTmuxTitleRunes = 40
 	tmuxExecTimeout   = 15 * time.Second
@@ -329,6 +335,55 @@ func (s *Server) handleRenameTmux(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": name, "title": title})
+}
+
+// tmuxHistoryCommand prints the last lines of the session's active pane (history + visible
+// screen) with SGR colors, keeping only the newest tmuxHistoryMaxBytes bytes.
+func tmuxHistoryCommand(id string, lines int) string {
+	return "tmux -u capture-pane -p -e -S -" + strconv.Itoa(lines) + " -t " + tmuxOptionTarget(id) +
+		" | tail -c " + strconv.Itoa(tmuxHistoryMaxBytes)
+}
+
+// trimHistory drops the first line when tail cut the output, since it may start mid-sequence.
+func trimHistory(out string) string {
+	if len(out) < tmuxHistoryMaxBytes {
+		return out
+	}
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		return out[i+1:]
+	}
+	return ""
+}
+
+// GET /api/v1/sessions/{id}/tmux/{name}/history?lines=N
+//
+// Inside tmux the client only ever sees tmux's alternate screen, so its local scrollback is
+// empty; the history lives on the remote host. Reading it never touches tmux state
+// (no copy-mode), so typing and the other attached device are unaffected.
+func (s *Server) handleTmuxHistory(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !validTmuxID(name) {
+		writeJSONError(w, http.StatusBadRequest, "invalid tmux session name")
+		return
+	}
+	execProv, ok := s.tmuxExecutor(w, r)
+	if !ok {
+		return
+	}
+	lines := tmuxHistoryDefaultLines
+	if v, err := strconv.Atoi(r.URL.Query().Get("lines")); err == nil && v > 0 {
+		lines = min(v, tmuxHistoryMaxLines)
+	}
+	res, err := runTmux(r.Context(), execProv, tmuxHistoryCommand(name, lines))
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if res.ExitCode != 0 {
+		writeJSONError(w, http.StatusNotFound, tmuxFailure(res))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"text": trimHistory(res.Stdout)})
 }
 
 // DELETE /api/v1/sessions/{id}/tmux/{name}

@@ -110,6 +110,14 @@ class AnsiTerminalBuffer(
     private val csiBuf = StringBuilder()
     private val oscBuf = StringBuilder()
 
+    /** True while a full-screen app (tmux, vim, ...) owns the screen; local scrollback is then empty. */
+    val isAltScreen: Boolean
+        @Synchronized get() = usingAltScreen
+
+    /** Lines reachable by scrolling back on the current screen. */
+    val scrollbackLines: Int
+        @Synchronized get() = if (usingAltScreen) 0 else scrollback.size
+
     @Synchronized
     fun resize(newCols: Int, newRows: Int): Boolean {
         val c = newCols.coerceIn(20, 320)

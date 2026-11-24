@@ -933,7 +933,10 @@ private fun SessionsScreen(
                 onTerminalResize = { cols, rows ->
                     active.socket?.sendResize(cols, rows)
                 },
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                historyBuffer = active.history,
+                onNeedHistory = { vm.loadTmuxHistory(active) },
+                onHistoryClosed = { vm.closeTmuxHistory(active) }
             )
 
             // 3. Contextual Slim Claude Approval Strip

@@ -308,6 +308,7 @@ func (s *Server) buildMux() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/tmux", s.requireBearer(s.handleCreateTmux))
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}/tmux/{name}", s.requireBearer(s.handleRenameTmux))
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}/tmux/{name}", s.requireBearer(s.handleKillTmux))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/tmux/{name}/history", s.requireBearer(s.handleTmuxHistory))
 
 	mux.HandleFunc("GET /api/v1/session-logs", s.requireBearer(s.handleListSessionLogs))
 	mux.HandleFunc("GET /api/v1/session-logs/{name}", s.requireBearer(s.handleGetSessionLog))

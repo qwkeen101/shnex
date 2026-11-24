@@ -118,6 +118,22 @@ func TestTmuxTargetsAreExact(t *testing.T) {
 	}
 }
 
+func TestTmuxHistoryCommand(t *testing.T) {
+	cmd := tmuxHistoryCommand("shnex-1", 3000)
+	for _, want := range []string{"tmux -u capture-pane -p -e -S -3000", "'=shnex-1:'", "tail -c"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("history command %q lacks %q", cmd, want)
+		}
+	}
+	if got := trimHistory("a\nb\n"); got != "a\nb\n" {
+		t.Fatalf("short output must be kept whole, got %q", got)
+	}
+	long := "partial" + "\n" + strings.Repeat("x", tmuxHistoryMaxBytes)
+	if got := trimHistory(long); strings.HasPrefix(got, "partial") {
+		t.Fatal("cut first line must be dropped")
+	}
+}
+
 func TestWorkspaceNameFor(t *testing.T) {
 	if got := workspaceNameFor(transport.RelayConfig{Mode: transport.RelayAuto}); got != "shnex-main" {
 		t.Fatalf("auto with empty name should report the real workspace, got %q", got)

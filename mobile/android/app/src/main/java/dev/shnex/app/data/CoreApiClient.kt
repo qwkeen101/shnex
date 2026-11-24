@@ -343,6 +343,11 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
         return res.optString("title", title)
     }
 
+    /** Recent history (with colors) of a conversation's active pane, oldest first. */
+    suspend fun tmuxHistory(sessionId: String, name: String, lines: Int = 3000): String {
+        return requestJson("/api/v1/sessions/$sessionId/tmux/$name/history?lines=$lines").optString("text")
+    }
+
     suspend fun killTmux(sessionId: String, name: String) {
         requestJson("/api/v1/sessions/$sessionId/tmux/$name", "DELETE")
     }
