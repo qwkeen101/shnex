@@ -18,14 +18,17 @@
 | `primary_node_id` / `backup_node_id` / `auto_lowest_latency` | 改为一个字段 `route.proxy_ids` | 顺序即主备 |
 | `PATCH /hosts/{id}/route` | 不加 | 保存主机时两端完整回传 `route` |
 | 网络中心、`used_by` 徽章、⇄ 对调、测速按钮、测本组延迟 | 不做 | 界面只在"走了备用"时提示一次 |
-| 订阅预览 / 正则筛选 / 流量到期 / Tombstone | 推迟到第 4 步 | 导入就是粘贴，复制哪几条就是筛选 |
-| 实例缓存池 | 不做 | 节点更新时关闭实例会切断正在用的会话 |
+| 订阅设置页 / 正则筛选 / 流量到期 / Tombstone / 定时刷新 | 不做 | 订阅地址就粘贴在同一个框里；重新粘贴即刷新 |
+| 实例回收 | 不做 | 每个链接一个 xray 实例、进程内常驻；节点更新时关闭旧实例会切断正在用的会话 |
 
 ## 3. 设计
 
 ### 3.1 一个代理池
 - 沿用 `settings.ProxyEntry`（`core/settings/store.go`），密码沿用 `shnex:proxy:<id>` 存入密钥库。
-- **导入就是粘贴**：`POST /api/v1/settings/proxies/import {"text"}`，每行一个链接，如 `socks5://user:pass@host:1080#香港`、`http://host:7890`。`#` 后为名称，缺省用 `host:port`。逐行报错，不影响其他行。第 3 步起同一入口接受 `vless://` 等分享链接。
+- **导入就是粘贴**：`POST /api/v1/settings/proxies/import {"text"}`，每行一个链接：`socks5://` `http(s)://host:port`，以及分享链接 `vless://` `vmess://` `trojan://` `ss://` `hysteria2://`/`hy2://`。`#` 后为名称，缺省用 `host:port`。逐行报错（只报行号，不回显内容），不影响其他行。
+- 分享链接整条存入密钥库（含 uuid / 密码），池里只记名称、协议、地址、端口。
+- **订阅就是粘贴一个网址**：带路径或参数的 `http(s)://` 行视为订阅（HTTP 代理没有路径）。核心拉取（UA `v2rayN`，返回 base64 分享链接），先把节点作为 `candidates` 返回，界面勾选后同一段文字带 `pick` 再发一次才写入。机场动辄几百个节点，全导进来主机的下拉框就没法用了。
+- 订阅地址里的 token 是凭据：**不保存订阅地址**，节点只记 `source`（地址的哈希）。**重新粘贴同一订阅即刷新**：已导入的节点按名称原地更新参数（ID 不变，主机继续可用），新节点可勾选加入，**绝不自动删除**。Clash YAML 订阅暂不支持，提示去机场后台复制 V2Ray 订阅。
 - 编辑不带密码时保留原密码；删除时同时清掉密钥。
 - **被主机引用的代理拒绝删除**（409，列出主机名），不存在悬空引用。
 
@@ -42,21 +45,25 @@
 
 ### 3.4 界面
 - **主机编辑**：网络区把"代理 URL"输入框换成两个下拉框 `代理 ①` `代理 ②`（选项：自动（系统代理）/ 直连 / 代理池各项）。① 为"自动"时 ② 不可选。旧主机的 `proxy_url` 原样保留显示。
-- **代理池页**：桌面"代理与 Tailnet 组网"页的四格表单换成一个"粘贴链接"文本框；Android 设置页新增同样的代理列表与粘贴导入。
+- **代理池页**：桌面"代理与 Tailnet 组网"页的四格表单换成一个"粘贴链接"文本框；Android 设置页新增同样的代理列表与粘贴导入。粘贴订阅时同一处列出节点勾选，这是唯一新增的界面。
 - **提示**：会话摘要新增 `route_via`（实际走的路线名）和 `route_fallback`（没走 ①）。走了备用时弹一次提示"主代理不通，已经 ② <名称> 连接"。不做常驻状态与测速。
 
 ## 4. 安全底线
 - 链接与密码不进日志、错误信息与备份；备份导入后被引用但不存在的代理 ID 视为无效，连接时报"代理已删除"。
-- 第 3 步接入加密协议时，默认拒绝 `allowInsecure` / `skip-cert-verify` 节点。
+- 不支持 `allowInsecure`（xray 自 2026-06 起已移除）；需要时用链接里的 `pcs`（证书 SHA-256 固定）/ `vcn`。
+- 订阅地址不落盘；拉取错误不含地址。
 
-## 5. 实施顺序
-1. **第 1 步（零新依赖）**：代理池粘贴导入 + `proxy_ids` + 错开竞速，仅 SOCKS5 / HTTP。核心、桌面、Android 一起交付。
-2. **第 2 步（本地验证）**：在本地执行 `go get github.com/xtls/xray-core`、`go mod tidy`、`go build ./...`，确认它要求的 gvisor 版本能与 tailscale 锁定的版本共存，并打出 Android aar、看 APK 体积增量。开发机不装依赖，这一步只能在本地做。
-3. **第 3 步**：接入 xray（VLESS-Reality、Trojan、Shadowsocks、VMess），作为竞速的一条候选；需要的话再接 Hysteria2（`apernet/hysteria`）。发布前在仓库根目录补 GPLv3 LICENSE。
-4. **第 4 步（可选）**：订阅 URL。刷新只按名称更新参数，绝不自动删除节点。
+## 5. 实施（四步已全部写完，未在开发机编译）
+1. **第 1 步**：代理池粘贴导入 + `proxy_ids` + 错开竞速（SOCKS5 / HTTP）。
+2. **第 2 步（依赖）**：`core/go.mod` 已声明 `github.com/xtls/xray-core v1.260327.0`。**xray 配置直接用 protobuf 构造，不引入 `infra/conf`**：后者会链接 xray 全部协议，包括基于 gVisor 的 TUN / WireGuard，与 tailscale 锁定的 gVisor 版本冲突、并让 Android 库膨胀。只引入用到的协议包，经源码遍历确认不触达 gVisor。
+3. **第 3 步**：`core/sharelink`（纯 Go 解析，可单测）+ `core/dialer/xray.go`（每个链接一个无入站的 xray 实例，`core.Dial` 出站）。支持 VLESS（含 Reality / Vision）、VMess、Trojan、Shadowsocks（含 2022）、Hysteria2（xray 自带实现，含 salamander 混淆；端口跳跃只取第一个端口）；传输 tcp / ws / grpc / httpupgrade / xhttp。不支持：kcp、h2、HTTP 伪装 TCP、带 plugin 的 ss、VLESS Encryption。仓库根目录已加 GPLv3 `LICENSE`。
+4. **第 4 步**：订阅（见 3.1）。
+
+本地需要执行：`cd core && go mod tidy && go test ./...`，`cd desktop && go mod tidy && go build ./...`，Android 打包（去掉 `-SkipCoreBind`）并对比 APK 体积。
 
 ## 6. 验证
-- `cd core && go test ./...`：链接解析、`proxy_ids` 规整、竞速（①慢 ②快、①立即失败、全部失败、标识前有杂行、赢家记忆）。
+- `cd core && go test ./...`：代理链接与分享链接解析（`core/sharelink`）、订阅解码、`proxy_ids` 规整、竞速（①慢 ②快、①立即失败、全部失败、标识前有杂行、赢家记忆）。
 - `cd desktop/frontend && npx tsc --noEmit`。
 - Android 打包必须去掉 `-SkipCoreBind`。
 - 实机：① 填一个不存在的代理端口、② 填可用代理，约 3 秒内连上并提示走了备用；对调后直接走 ①；删除被引用的代理被拒绝。
+- 实机：粘贴机场订阅 → 勾选几个节点 → 主机选 ① VLESS-Reality 节点、② Hysteria2 节点能连上；再次粘贴同一订阅只刷新、不重复。

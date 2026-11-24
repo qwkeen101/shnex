@@ -35,6 +35,17 @@ data class HostItem(
     val proxyIds: List<String> = emptyList()
 )
 
+/** A node offered by a pasted subscription; existing ones are refreshed in place. */
+data class ProxyCandidate(val key: String, val name: String, val scheme: String, val existing: Boolean)
+
+data class ProxyImportResult(
+    val proxies: List<ProxyItem>,
+    val imported: Int,
+    val refreshed: Int,
+    val errors: List<String>,
+    val candidates: List<ProxyCandidate>
+)
+
 /** One proxy of the pool (Settings > 代理); hosts pick ① / ② from it. */
 data class ProxyItem(
     val id: String,
@@ -290,15 +301,36 @@ class CoreApiClient(private val endpoint: CoreEndpoint) {
 
     suspend fun listProxies(): List<ProxyItem> = parseProxies(requestJson("/api/v1/settings"))
 
-    /** Paste-to-import: one link per line. Returns the new pool and per-line error messages. */
-    suspend fun importProxies(text: String): Pair<List<ProxyItem>, List<String>> {
-        val res = requestJson("/api/v1/settings/proxies/import", "POST", JSONObject().put("text", text))
+    /**
+     * Paste-to-import: one link per line. A subscription URL first comes back as
+     * candidates; send the same text again with [pick] (candidate keys) to import.
+     */
+    suspend fun importProxies(text: String, pick: List<String>? = null): ProxyImportResult {
+        val body = JSONObject().put("text", text)
+        if (pick != null) body.put("pick", JSONArray(pick))
+        val res = requestJson("/api/v1/settings/proxies/import", "POST", body)
         val errs = res.optJSONArray("errors")
         val messages = if (errs == null) emptyList() else (0 until errs.length()).map { i ->
             val e = errs.getJSONObject(i)
-            "第 ${e.optInt("line")} 行：${e.optString("error")}"
+            val line = e.optInt("line")
+            if (line > 0) "第 $line 行：${e.optString("error")}" else e.optString("error")
         }
-        return parseProxies(res.optJSONObject("settings") ?: JSONObject()) to messages
+        val cands = res.optJSONArray("candidates")
+        return ProxyImportResult(
+            proxies = parseProxies(res.optJSONObject("settings") ?: JSONObject()),
+            imported = res.optInt("imported"),
+            refreshed = res.optInt("refreshed"),
+            errors = messages,
+            candidates = if (cands == null) emptyList() else (0 until cands.length()).map { i ->
+                val c = cands.getJSONObject(i)
+                ProxyCandidate(
+                    key = c.optString("key"),
+                    name = c.optString("name"),
+                    scheme = c.optString("scheme"),
+                    existing = c.optBoolean("existing", false)
+                )
+            }
+        )
     }
 
     /** Fails with the list of hosts when a host still routes through this proxy. */

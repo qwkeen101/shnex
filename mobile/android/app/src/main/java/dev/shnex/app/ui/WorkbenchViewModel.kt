@@ -17,6 +17,7 @@ import dev.shnex.app.data.CompiledMarkdownDoc
 import dev.shnex.app.data.CompletionItem
 import dev.shnex.app.data.CoreApiClient
 import dev.shnex.app.data.HostItem
+import dev.shnex.app.data.ProxyCandidate
 import dev.shnex.app.data.ProxyItem
 import dev.shnex.app.data.RemoteFileEntry
 import dev.shnex.app.data.RemoteTmuxSession
@@ -301,19 +302,34 @@ class WorkbenchViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** onResult gets a short message for the import dialog. */
-    fun importProxies(text: String, onResult: (String) -> Unit) {
+    /**
+     * onResult gets subscription candidates to pick from (empty once imported) and a
+     * message for the dialog ("" = done, clear the text).
+     */
+    fun importProxies(
+        text: String,
+        pick: List<String>?,
+        onResult: (candidates: List<ProxyCandidate>, message: String) -> Unit
+    ) {
         val client = apiClient ?: return
         viewModelScope.launch {
-            runCatching { client.importProxies(text) }
-                .onSuccess { (list, errors) ->
-                    val added = list.size - proxies.size
+            runCatching { client.importProxies(text, pick) }
+                .onSuccess { r ->
                     proxies.clear()
-                    proxies.addAll(list)
-                    onResult(if (errors.isEmpty()) "" else errors.joinToString("\n"))
-                    if (errors.isEmpty()) showToast("已导入 ${maxOf(added, 0)} 个代理")
+                    proxies.addAll(r.proxies)
+                    if (pick == null && r.candidates.isNotEmpty()) {
+                        onResult(r.candidates, r.errors.joinToString("\n"))
+                        return@onSuccess
+                    }
+                    val done = "已导入 ${r.imported} 个" + if (r.refreshed > 0) "，刷新 ${r.refreshed} 个" else ""
+                    if (r.errors.isEmpty()) {
+                        showToast(done)
+                        onResult(emptyList(), "")
+                    } else {
+                        onResult(emptyList(), done + "\n" + r.errors.joinToString("\n"))
+                    }
                 }
-                .onFailure { e -> onResult(e.message ?: "导入失败") }
+                .onFailure { e -> onResult(emptyList(), e.message ?: "导入失败") }
         }
     }
 

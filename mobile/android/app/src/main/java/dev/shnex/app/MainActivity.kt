@@ -102,6 +102,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.shnex.app.data.HostItem
+import dev.shnex.app.data.ProxyCandidate
 import dev.shnex.app.data.ProxyItem
 import dev.shnex.app.service.ShnexRelayService
 import dev.shnex.app.terminal.FontCatalog
@@ -1147,55 +1148,111 @@ private fun RoutePicker(
     }
 }
 
-/** Settings › 代理: the proxy pool. Pasting links is the import. */
+/** Settings › 代理: the proxy pool. Pasting links (or a subscription URL) is the import. */
 @Composable
 private fun ProxyPoolDialog(vm: WorkbenchViewModel, onDismiss: () -> Unit) {
     var links by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
+    var candidates by remember { mutableStateOf<List<ProxyCandidate>>(emptyList()) }
+    var picked by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val onImported: (List<ProxyCandidate>, String) -> Unit = { cands, msg ->
+        candidates = cands
+        picked = emptySet()
+        message = msg
+        if (cands.isEmpty() && msg.isEmpty()) links = ""
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("代理", fontSize = 16.sp) },
+        title = { Text(if (candidates.isEmpty()) "代理" else "选择订阅节点", fontSize = 16.sp) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                vm.proxies.forEach { p ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(p.name, color = Color.White, fontSize = 13.sp)
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                if (candidates.isNotEmpty()) {
+                    Text("勾选要用的节点；已导入的会按名称刷新", color = Color(0xFF8B909A), fontSize = 12.sp)
+                    candidates.forEach { c ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !c.existing) {
+                                    picked = if (c.key in picked) picked - c.key else picked + c.key
+                                }
+                        ) {
+                            Checkbox(
+                                checked = c.existing || c.key in picked,
+                                enabled = !c.existing,
+                                onCheckedChange = { on -> picked = if (on) picked + c.key else picked - c.key }
+                            )
                             Text(
-                                "${p.scheme}://${p.host}:${p.port}",
-                                color = Color(0xFF8B909A),
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
+                                c.name,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                if (c.existing) "已导入" else c.scheme,
+                                color = if (c.existing) Color(0xFF4ADE80) else Color(0xFF8B909A),
+                                fontSize = 11.sp
                             )
                         }
-                        IconButton(onClick = { vm.deleteProxy(p.id) }, modifier = Modifier.size(30.dp)) {
-                            Icon(Icons.Default.Close, contentDescription = "删除", tint = Color(0xFF8B909A), modifier = Modifier.size(16.dp))
+                    }
+                } else {
+                    vm.proxies.forEach { p ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(p.name, color = Color.White, fontSize = 13.sp)
+                                Text(
+                                    "${p.scheme}://${p.host}:${p.port}",
+                                    color = Color(0xFF8B909A),
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            IconButton(onClick = { vm.deleteProxy(p.id) }, modifier = Modifier.size(30.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "删除", tint = Color(0xFF8B909A), modifier = Modifier.size(16.dp))
+                            }
                         }
                     }
+                    OutlinedTextField(
+                        value = links,
+                        onValueChange = { links = it },
+                        label = { Text("粘贴节点链接或订阅地址，每行一个") },
+                        placeholder = { Text("vless:// trojan:// ss:// hy2:// socks5:// 或 https://订阅地址", fontSize = 12.sp) },
+                        minLines = 2,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
-                OutlinedTextField(
-                    value = links,
-                    onValueChange = { links = it },
-                    label = { Text("粘贴代理链接，每行一个") },
-                    placeholder = { Text("socks5://用户:密码@1.2.3.4:1080#香港", fontSize = 12.sp) },
-                    minLines = 2,
-                    maxLines = 5,
-                    modifier = Modifier.fillMaxWidth()
-                )
                 if (message.isNotEmpty()) {
                     Text(message, color = Color(0xFFFCA5A5), fontSize = 11.sp)
                 }
             }
         },
         confirmButton = {
-            Button(enabled = links.isNotBlank(), onClick = {
-                vm.importProxies(links) { msg ->
-                    message = msg
-                    if (msg.isEmpty()) links = ""
+            if (candidates.isNotEmpty()) {
+                Button(onClick = { vm.importProxies(links, picked.toList(), onImported) }) {
+                    Text("导入所选（${picked.size}）")
                 }
-            }) { Text("导入") }
+            } else {
+                Button(enabled = links.isNotBlank(), onClick = { vm.importProxies(links, null, onImported) }) {
+                    Text("导入")
+                }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+        dismissButton = {
+            TextButton(onClick = {
+                if (candidates.isNotEmpty()) {
+                    candidates = emptyList()
+                    message = ""
+                } else {
+                    onDismiss()
+                }
+            }) { Text(if (candidates.isNotEmpty()) "取消" else "关闭") }
+        }
     )
 }
 
@@ -1327,7 +1384,7 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("代理", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text("粘贴链接导入；主机里选主备，主不通自动走备", color = Color(0xFF8B909A), fontSize = 12.sp)
+                        Text("粘贴节点或订阅导入；主机里选主备，主不通自动走备", color = Color(0xFF8B909A), fontSize = 12.sp)
                     }
                     Text("${vm.proxies.size} 个", color = Color(0xFF9CA3AF), fontSize = 12.sp)
                 }

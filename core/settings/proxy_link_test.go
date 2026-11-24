@@ -20,7 +20,13 @@ func TestParseProxyLink(t *testing.T) {
 		t.Fatalf("socks:// should map to socks5: %+v %v", p, err)
 	}
 
-	for _, bad := range []string{"vless://uuid@h:443", "socks5://h", "http://:80", "not a link", "socks5://h:99999"} {
+	link := "trojan://pw@example.com:443?sni=example.com#日本"
+	p, secret, err := ParseProxyLink(link)
+	if err != nil || p.Scheme != "trojan" || p.Host != "example.com" || p.Port != 443 || p.Name != "日本" || secret != link {
+		t.Fatalf("share link parsed wrong: %+v %v", p, err)
+	}
+
+	for _, bad := range []string{"vless://h:443", "wireguard://k@h:1", "socks5://h", "http://:80", "not a link", "socks5://h:99999"} {
 		if _, _, err := ParseProxyLink(bad); err == nil {
 			t.Errorf("%q should be rejected", bad)
 		}

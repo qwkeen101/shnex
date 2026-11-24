@@ -67,6 +67,7 @@ import {
   importProxies,
   upsertAIProvider,
 } from "../api";
+import type { ProxyCandidate } from "../api";
 
 export type SettingsCategory =
   | "general"
@@ -289,6 +290,35 @@ export const SettingsView: React.FC<Props> = ({
   // Proxy pool: paste links to import
   const [prxLinks, setPrxLinks] = useState("");
   const [prxMsg, setPrxMsg] = useState("");
+  const [prxCands, setPrxCands] = useState<ProxyCandidate[] | null>(null);
+  const [prxPick, setPrxPick] = useState<Set<string>>(new Set());
+  const runProxyImport = async (pick?: string[]) => {
+    try {
+      const res = await importProxies(prxLinks, pick);
+      onChange(res.settings);
+      if (!pick && res.candidates && res.candidates.length > 0) {
+        setPrxCands(res.candidates);
+        setPrxPick(new Set());
+        setPrxMsg(res.errors.map((x) => x.error).join("；"));
+        return;
+      }
+      setPrxCands(null);
+      const done =
+        `已导入 ${res.imported} 个` + (res.refreshed ? `，刷新 ${res.refreshed} 个` : "");
+      if (res.errors.length === 0) {
+        setPrxLinks("");
+        setPrxMsg(done);
+      } else {
+        setPrxMsg(
+          done +
+            "；" +
+            res.errors.map((x) => (x.line ? `第 ${x.line} 行：${x.error}` : x.error)).join("；")
+        );
+      }
+    } catch (e) {
+      setPrxMsg((e as Error).message);
+    }
+  };
 
   // MCP Form
   const [mcpName, setMcpName] = useState("");
@@ -2237,7 +2267,7 @@ export const SettingsView: React.FC<Props> = ({
                       代理与 Tailnet 组网
                     </h1>
                     <p className="text-[#8b909a] mt-0.5">
-                      代理池（SOCKS5 / HTTP）与内置用户态 Tailscale / Headscale。主机在「网络」里选主备代理。
+                      代理池（VLESS / Trojan / SS / VMess / Hysteria2 / SOCKS5 / HTTP，可粘贴订阅）与内置用户态 Tailscale / Headscale。主机在「网络」里选主备代理；重新粘贴同一订阅即刷新节点。
                     </p>
                   </div>
                   <button
@@ -2254,35 +2284,75 @@ export const SettingsView: React.FC<Props> = ({
                     onChange={(e) => setPrxLinks(e.target.value)}
                     rows={3}
                     spellCheck={false}
-                    placeholder={"粘贴代理链接，每行一个\nsocks5://用户:密码@1.2.3.4:1080#香港\nhttp://127.0.0.1:7890"}
+                    placeholder={
+                      "粘贴代理链接或订阅地址，每行一个\nvless:// trojan:// ss:// vmess:// hy2:// socks5:// http://\nhttps://机场域名/api/v1/client/subscribe?token=…"
+                    }
                     className="w-full px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white font-mono outline-none resize-y"
                   />
                   <div className="flex items-center gap-3">
                     <button
-                      disabled={!prxLinks.trim()}
-                      onClick={async () => {
-                        try {
-                          const res = await importProxies(prxLinks);
-                          onChange(res.settings);
-                          if (res.errors.length === 0) {
-                            setPrxLinks("");
-                            setPrxMsg(`已导入 ${res.imported} 个`);
-                          } else {
-                            setPrxMsg(
-                              `已导入 ${res.imported} 个；` +
-                                res.errors.map((x) => `第 ${x.line} 行：${x.error}`).join("；")
-                            );
-                          }
-                        } catch (e) {
-                          setPrxMsg((e as Error).message);
-                        }
-                      }}
+                      disabled={!prxLinks.trim() || prxCands !== null}
+                      onClick={() => void runProxyImport()}
                       className="px-4 py-1.5 rounded-lg bg-[#2563eb] text-white font-medium disabled:opacity-40"
                     >
                       导入
                     </button>
                     {prxMsg && <span className="text-[12px] text-[#9ca3af]">{prxMsg}</span>}
                   </div>
+
+                  {prxCands && (
+                    <div className="rounded-lg border border-[#343742] bg-[#1b1c21]">
+                      <div className="px-3 py-2 flex items-center justify-between border-b border-[#2d3039]">
+                        <span className="text-[12px] text-[#9ca3af]">
+                          订阅里有 {prxCands.length} 个节点，勾选要用的；已导入的会按名称刷新
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setPrxCands(null);
+                              setPrxMsg("");
+                            }}
+                            className="px-3 py-1 rounded-md text-[#9ca3af] hover:text-white"
+                          >
+                            取消
+                          </button>
+                          <button
+                            onClick={() => void runProxyImport([...prxPick])}
+                            className="px-3 py-1 rounded-md bg-[#2563eb] text-white font-medium"
+                          >
+                            导入所选（{prxPick.size}）
+                          </button>
+                        </div>
+                      </div>
+                      <div className="max-h-72 overflow-y-auto py-1">
+                        {prxCands.map((c) => (
+                          <label
+                            key={c.key}
+                            className="px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#25272e] cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={c.existing}
+                              checked={c.existing || prxPick.has(c.key)}
+                              onChange={(e) => {
+                                const next = new Set(prxPick);
+                                if (e.target.checked) next.add(c.key);
+                                else next.delete(c.key);
+                                setPrxPick(next);
+                              }}
+                            />
+                            <span className="text-white truncate">{c.name}</span>
+                            <span className="text-[11px] text-[#7c828e] font-mono shrink-0">
+                              {c.scheme}
+                            </span>
+                            {c.existing && (
+                              <span className="text-[11px] text-[#4ade80] shrink-0">已导入</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="space-y-2 pt-2">
                     {settings.proxies.map((p) => (

@@ -1207,12 +1207,31 @@ export async function upsertNamedProxy(input: {
 }
 
 /** Paste-to-import: one socks5:// or http:// link per line, "#name" optional. */
-export async function importProxies(text: string): Promise<{
+/** A node offered by a pasted subscription; existing ones are refreshed in place. */
+export interface ProxyCandidate {
+  key: string;
+  name: string;
+  scheme: string;
+  host: string;
+  port: number;
+  existing: boolean;
+}
+
+/**
+ * Paste-to-import. Links are added at once; a subscription URL first comes back as
+ * `candidates` and is imported by sending the same text again with `pick`.
+ */
+export async function importProxies(
+  text: string,
+  pick?: string[]
+): Promise<{
   settings: AppSettings;
   imported: number;
+  refreshed?: number;
   errors: { line: number; error: string }[];
+  candidates?: ProxyCandidate[];
 }> {
-  return apiRequest("/api/v1/settings/proxies/import", "POST", { text });
+  return apiRequest("/api/v1/settings/proxies/import", "POST", pick ? { text, pick } : { text });
 }
 
 export async function deleteNamedProxy(id: string): Promise<AppSettings> {

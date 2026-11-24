@@ -26,6 +26,7 @@ import (
 	"github.com/shnex/shnex/core/localpty"
 	"github.com/shnex/shnex/core/platform"
 	"github.com/shnex/shnex/core/settings"
+	"github.com/shnex/shnex/core/sharelink"
 	shnexssh "github.com/shnex/shnex/core/ssh"
 	"github.com/shnex/shnex/core/tailnet"
 	"github.com/shnex/shnex/core/transport"
@@ -714,6 +715,10 @@ func (s *Server) buildRaceDialer(ctx context.Context, req CreateSessionRequest) 
 		}
 		pd, err := dialer.NewProxyDialerFromURL(proxyURL, dialer.NewDirectDialer(15*time.Second, 30*time.Second))
 		if err != nil {
+			if sharelink.IsProtocol(entry.Scheme) {
+				// share-link errors are written to never contain the link
+				return nil, fmt.Errorf("代理「%s」无法使用：%v", entry.Name, err)
+			}
 			return nil, fmt.Errorf("代理「%s」配置无效", entry.Name) // never echo the URL: it may hold a password
 		}
 		cands = append(cands, dialer.RaceCandidate{Key: id, Name: entry.Name, Dialer: pd})

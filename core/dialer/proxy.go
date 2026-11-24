@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/shnex/shnex/core/sharelink"
 	"golang.org/x/net/proxy"
 )
 
@@ -228,6 +229,10 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 // NewProxyDialerFromURL constructs either a SOCKS5Dialer or HTTPProxyDialer from
 // a URL such as "socks5://user:pass@127.0.0.1:1080" or "http://127.0.0.1:7890".
 func NewProxyDialerFromURL(rawURL string, upstream Dialer) (Dialer, error) {
+	if sharelink.IsShareLink(rawURL) {
+		// vless:// trojan:// ss:// ... go through xray; it dials the node itself
+		return NewXrayDialer(rawURL)
+	}
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return nil, fmt.Errorf("dialer: invalid proxy url: %w", err)

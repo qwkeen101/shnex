@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/shnex/shnex/core/platform"
+	"github.com/shnex/shnex/core/sharelink"
 )
 
 type RightRailVisibility struct {
@@ -161,12 +162,15 @@ type CredentialEntry struct {
 type ProxyEntry struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	Scheme    string `json:"scheme"` // "socks5" | "http" | "https"
+	Scheme    string `json:"scheme"` // "socks5" | "http" | "https" | "vless" | "vmess" | "trojan" | "ss" | "hysteria2"
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	Username  string `json:"username,omitempty"`
 	HasSecret bool   `json:"has_secret"`
 	SecretRef string `json:"secret_ref,omitempty"`
+	// Source identifies the subscription a node came from (a hash, never the URL, whose
+	// token is a credential). Re-pasting that subscription refreshes these nodes by name.
+	Source string `json:"source,omitempty"`
 }
 
 type AppSettings struct {
@@ -589,6 +593,10 @@ func (s *Store) UpsertProxy(ctx context.Context, p ProxyEntry, password string) 
 	if p.Scheme == "" {
 		p.Scheme = "socks5"
 	}
+	if sharelink.IsProtocol(p.Scheme) && password != "" && s.bridge == nil {
+		// the link is the only copy of the node's credentials; without a vault it would be lost
+		return AppSettings{}, errors.New("settings: 密钥库不可用，无法保存节点")
+	}
 	if password != "" && s.bridge != nil {
 		p.SecretRef = "shnex:proxy:" + p.ID
 		if err := s.bridge.SetSecret(ctx, p.SecretRef, password); err != nil {
@@ -629,6 +637,17 @@ func (s *Store) ProxyByID(ctx context.Context, id string) (ProxyEntry, string, e
 	if entry == nil {
 		return ProxyEntry{}, "", fmt.Errorf("settings: proxy %q has been deleted", id)
 	}
+	if sharelink.IsProtocol(entry.Scheme) {
+		// share-link nodes keep the whole link (uuid / password included) as the secret
+		link := ""
+		if entry.SecretRef != "" && s.bridge != nil {
+			link, _ = s.bridge.GetSecret(ctx, entry.SecretRef)
+		}
+		if strings.TrimSpace(link) == "" {
+			return ProxyEntry{}, "", fmt.Errorf("代理「%s」的节点参数丢失，请重新导入", entry.Name)
+		}
+		return *entry, link, nil
+	}
 	u := url.URL{Scheme: entry.Scheme, Host: net.JoinHostPort(entry.Host, strconv.Itoa(entry.Port))}
 	password := ""
 	if entry.HasSecret && entry.SecretRef != "" && s.bridge != nil {
@@ -643,10 +662,19 @@ func (s *Store) ProxyByID(ctx context.Context, id string) (ProxyEntry, string, e
 	return *entry, u.String(), nil
 }
 
-// ParseProxyLink turns one pasted line such as "socks5://user:pass@host:1080#香港" into a
-// pool entry and its password. Only SOCKS5 / HTTP(S) proxies for now.
+// ParseProxyLink turns one pasted line into a pool entry and the secret to store:
+// "socks5://user:pass@host:1080#香港" keeps just the password, while share links
+// (vless:// vmess:// trojan:// ss:// hysteria2://) keep the whole link.
 func ParseProxyLink(line string) (ProxyEntry, string, error) {
-	u, err := url.Parse(strings.TrimSpace(line))
+	line = strings.TrimSpace(line)
+	if sharelink.IsShareLink(line) {
+		n, err := sharelink.Parse(line)
+		if err != nil {
+			return ProxyEntry{}, "", err
+		}
+		return ProxyEntry{Name: n.Name, Scheme: n.Protocol, Host: n.Host, Port: n.Port}, line, nil
+	}
+	u, err := url.Parse(line)
 	if err != nil {
 		return ProxyEntry{}, "", errors.New("不是有效的链接")
 	}
@@ -659,7 +687,7 @@ func ParseProxyLink(line string) (ProxyEntry, string, error) {
 		scheme = "socks5"
 	case "http", "https":
 	default:
-		return ProxyEntry{}, "", fmt.Errorf("暂不支持 %s:// 链接（目前只支持 socks5 / http）", u.Scheme)
+		return ProxyEntry{}, "", fmt.Errorf("暂不支持 %s:// 链接", u.Scheme)
 	}
 	host := u.Hostname()
 	port, err := strconv.Atoi(u.Port())

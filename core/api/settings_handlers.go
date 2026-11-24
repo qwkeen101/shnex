@@ -2,9 +2,15 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +19,7 @@ import (
 
 	"github.com/shnex/shnex/core/hosts"
 	"github.com/shnex/shnex/core/settings"
+	"github.com/shnex/shnex/core/sharelink"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -423,9 +430,15 @@ func (s *Server) handleUpsertProxy(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/settings/proxies/import  {"text": "one link per line"}
 // Pasting is the import: whichever links the user copied are the ones kept.
+// handleImportProxies is the whole import UI: one link per line. Proxy and share links
+// are added at once. A subscription URL (http(s) with a path or query) is fetched and its
+// nodes returned as candidates first; the client sends the same text back with "pick"
+// set to the keys to add. Nodes already imported from that subscription are refreshed
+// in place by name (hosts keep routing through them); nothing is ever removed.
 func (s *Server) handleImportProxies(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text string `json:"text"`
+		Text string    `json:"text"`
+		Pick *[]string `json:"pick"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -435,26 +448,182 @@ func (s *Server) handleImportProxies(w http.ResponseWriter, r *http.Request) {
 		Line  int    `json:"line"`
 		Error string `json:"error"`
 	}
+	type candidate struct {
+		Key      string `json:"key"`
+		Name     string `json:"name"`
+		Scheme   string `json:"scheme"`
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		Existing bool   `json:"existing"`
+
+		entry      settings.ProxyEntry
+		link       string
+		existingID string
+	}
+	type plainLine struct {
+		line int
+		text string
+	}
 	errs := []lineError{}
-	imported := 0
-	updated := s.settingsStore.Get()
+	var plain []plainLine
+	var candidates []candidate
+	current := s.settingsStore.Get().Proxies
 	for i, raw := range strings.Split(body.Text, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		entry, password, err := settings.ParseProxyLink(line)
+		if !isSubscriptionURL(line) {
+			plain = append(plain, plainLine{i + 1, line})
+			continue
+		}
+		links, err := fetchSubscription(r.Context(), line)
+		if err != nil {
+			errs = append(errs, lineError{Line: i + 1, Error: err.Error()})
+			continue
+		}
+		sum := sha256.Sum256([]byte(line))
+		source := "sub:" + hex.EncodeToString(sum[:8])
+		seen := map[string]int{}
+		unsupported := 0
+		for _, link := range links {
+			entry, _, err := settings.ParseProxyLink(link)
+			if err != nil {
+				unsupported++
+				continue
+			}
+			// airports reuse names rarely, but a refresh must map one name to one node
+			if seen[entry.Name]++; seen[entry.Name] > 1 {
+				entry.Name = fmt.Sprintf("%s (%d)", entry.Name, seen[entry.Name])
+			}
+			entry.Source = source
+			c := candidate{
+				Key: source + "/" + entry.Name, Name: entry.Name, Scheme: entry.Scheme,
+				Host: entry.Host, Port: entry.Port, entry: entry, link: link,
+			}
+			for _, p := range current {
+				if p.Source == source && p.Name == entry.Name {
+					c.Existing, c.existingID = true, p.ID
+					break
+				}
+			}
+			candidates = append(candidates, c)
+		}
+		if unsupported > 0 {
+			errs = append(errs, lineError{Line: i + 1, Error: fmt.Sprintf("订阅里有 %d 个节点暂不支持，已跳过", unsupported)})
+		}
+		if len(candidates) > 1000 {
+			candidates = candidates[:1000]
+		}
+	}
+
+	// A subscription was pasted: show its nodes before writing anything.
+	if body.Pick == nil && len(candidates) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"settings": s.settingsStore.Get(), "imported": 0, "errors": errs, "candidates": candidates,
+		})
+		return
+	}
+
+	updated := s.settingsStore.Get()
+	imported, refreshed := 0, 0
+	for _, pl := range plain {
+		entry, secret, err := settings.ParseProxyLink(pl.text)
 		if err == nil {
-			updated, err = s.settingsStore.UpsertProxy(r.Context(), entry, password)
+			var next settings.AppSettings
+			if next, err = s.settingsStore.UpsertProxy(r.Context(), entry, secret); err == nil {
+				updated = next
+			}
 		}
 		if err != nil {
 			// report the line number only: the line may contain a password
-			errs = append(errs, lineError{Line: i + 1, Error: err.Error()})
+			errs = append(errs, lineError{Line: pl.line, Error: err.Error()})
 			continue
 		}
 		imported++
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": updated, "imported": imported, "errors": errs})
+	picked := map[string]bool{}
+	if body.Pick != nil {
+		for _, k := range *body.Pick {
+			picked[k] = true
+		}
+	}
+	for _, c := range candidates {
+		delete(picked, c.Key)
+		if !c.Existing && body.Pick != nil && !containsString(*body.Pick, c.Key) {
+			continue
+		}
+		entry := c.entry
+		entry.ID = c.existingID
+		next, err := s.settingsStore.UpsertProxy(r.Context(), entry, c.link)
+		if err != nil {
+			errs = append(errs, lineError{Error: err.Error()})
+			continue
+		}
+		updated = next
+		if c.Existing {
+			refreshed++
+		} else {
+			imported++
+		}
+	}
+	if len(picked) > 0 {
+		// the subscription is fetched again on pick; it may have changed in between
+		errs = append(errs, lineError{Error: fmt.Sprintf("有 %d 个勾选的节点在订阅里找不到了，请重新粘贴订阅", len(picked))})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"settings": updated, "imported": imported, "refreshed": refreshed, "errors": errs})
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// isSubscriptionURL tells a subscription (https://airport/api/sub?token=...) from an
+// HTTP proxy (http://user:pass@1.2.3.4:8080), which has no path.
+func isSubscriptionURL(line string) bool {
+	u, err := url.Parse(line)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return false
+	}
+	return (u.Path != "" && u.Path != "/") || u.RawQuery != ""
+}
+
+// fetchSubscription downloads a subscription and returns its share links. Errors never
+// include the URL: its token is a credential.
+func fetchSubscription(ctx context.Context, rawURL string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, errors.New("订阅地址无效")
+	}
+	// airports pick the response format by client; this one gets base64 share links
+	req.Header.Set("User-Agent", "v2rayN/7.0")
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errors.New("订阅拉取失败：连不上订阅服务器")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("订阅拉取失败：HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, errors.New("订阅拉取失败：读取中断")
+	}
+	return sharelink.DecodeSubscription(data)
 }
 
 func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request) {
