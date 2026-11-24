@@ -113,6 +113,9 @@ type RelayConfig struct {
 	SessionName string    `json:"session_name,omitempty"`
 	AgentPath   string    `json:"agent_path,omitempty"`
 	Command     string    `json:"command,omitempty"`
+	// MustExist (tmux only): attach to SessionName only if it already exists instead of
+	// creating it, so reconnecting to a conversation ended elsewhere cannot resurrect it.
+	MustExist bool `json:"must_exist,omitempty"`
 }
 
 // SessionConfig contains protocol-neutral parameters for opening an interactive terminal session.

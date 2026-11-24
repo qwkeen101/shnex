@@ -40,6 +40,9 @@ var ErrHostKeyVerificationRequired = errors.New("ssh: host key policy required (
 // ErrPasswordRequired indicates that local/saved keys could not authenticate and an interactive password is needed.
 var ErrPasswordRequired = errors.New("ssh: authentication requires password (AUTH_PASSWORD_NEEDED)")
 
+// ErrTmuxSessionGone is returned when Relay.MustExist is set and the tmux session no longer exists.
+var ErrTmuxSessionGone = errors.New("ssh: tmux session no longer exists (TMUX_SESSION_GONE)")
+
 // Transport implements transport.Transport over SSHv2 PTY and shnex-agent mux channels.
 type Transport struct {
 	bridge     platform.PlatformBridge
@@ -168,6 +171,13 @@ func (t *Transport) OpenSession(ctx context.Context, cfg transport.SessionConfig
 		_ = client.Close()
 		if cfg.DialerCloser != nil {
 			_ = cfg.DialerCloser.Close()
+		}
+	}
+
+	if cfg.Relay.MustExist && (cfg.Relay.Mode == transport.RelayTmux || cfg.Relay.Mode == transport.RelayAuto) {
+		if missing, mErr := tmuxSessionMissing(client, cfg.Relay.SessionName); mErr == nil && missing {
+			cleanupFail()
+			return nil, ErrTmuxSessionGone
 		}
 	}
 
@@ -875,6 +885,27 @@ func (s *Session) Close() error {
 		}
 	})
 	return closeErr
+}
+
+// tmuxSessionMissing reports whether tmux is installed on the remote host but has no session
+// with exactly this name. Any other outcome (no tmux, probe failure) reports false.
+func tmuxSessionMissing(client *gossh.Client, name string) (bool, error) {
+	probe, err := client.NewSession()
+	if err != nil {
+		return false, err
+	}
+	defer probe.Close()
+	ws := relay.SanitizeWorkspaceName(name)
+	script := "command -v tmux >/dev/null 2>&1 || exit 0; tmux has-session -t " + relay.PosixQuote("="+ws) + " 2>/dev/null"
+	err = probe.Run(script)
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *gossh.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitStatus() == 1 {
+		return true, nil
+	}
+	return false, err
 }
 
 func (s *Session) monitorWait() {

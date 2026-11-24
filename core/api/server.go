@@ -304,6 +304,10 @@ func (s *Server) buildMux() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}/sftp/remove", s.requireBearer(s.handleSFTPRemove))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/sftp/sudo-password", s.requireBearer(s.handleSFTPSudoPassword))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/upload-image", s.requireBearer(s.handleSessionUploadImage))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/tmux", s.requireBearer(s.handleListTmux))
+	mux.HandleFunc("POST /api/v1/sessions/{id}/tmux", s.requireBearer(s.handleCreateTmux))
+	mux.HandleFunc("PATCH /api/v1/sessions/{id}/tmux/{name}", s.requireBearer(s.handleRenameTmux))
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}/tmux/{name}", s.requireBearer(s.handleKillTmux))
 
 	mux.HandleFunc("GET /api/v1/session-logs", s.requireBearer(s.handleListSessionLogs))
 	mux.HandleFunc("GET /api/v1/session-logs/{name}", s.requireBearer(s.handleGetSessionLog))
@@ -627,6 +631,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "需要输入 SSH 密码（本机默认密钥未能完成认证）",
 				"code":  "AUTH_PASSWORD_NEEDED",
+			})
+			return
+		}
+		if errors.Is(err, shnexssh.ErrTmuxSessionGone) {
+			writeJSON(w, http.StatusGone, map[string]string{
+				"error": "远端对话已结束",
+				"code":  "TMUX_SESSION_GONE",
 			})
 			return
 		}
@@ -1045,7 +1056,7 @@ func (m *managedSession) summary() SessionSummary {
 		Target:          m.sess.Target(),
 		User:            m.user,
 		RelayMode:       m.relayCfg.Mode,
-		WorkspaceName:   m.relayCfg.SessionName,
+		WorkspaceName:   workspaceNameFor(m.relayCfg),
 		Size:            sz,
 		CreatedAt:       m.createdAt,
 		AttachedClients: m.attachedCount.Load(),
