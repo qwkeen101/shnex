@@ -1004,6 +1004,12 @@ private fun ExtraKeyChip(
 
 @Composable
 private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
+    val context = LocalContext.current
+    val versionName = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }
+            .getOrNull()
+            .orEmpty()
+    }
     var controlUrl by remember { mutableStateOf("") }
     var authKey by remember { mutableStateOf("") }
     var showTsDialog by remember { mutableStateOf(false) }
@@ -1146,7 +1152,7 @@ private fun MobileSettingsScreen(vm: WorkbenchViewModel) {
                 .border(1.dp, Color(0xFF2C2F3A), RoundedCornerShape(18.dp))
         ) {
             Column(modifier = Modifier.padding(15.dp)) {
-                Text("Shnex Android v0.3.12", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("Shnex Android v$versionName", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "架构：Go 单核引擎 (127.0.0.1 进程内桥接) + Jetpack Compose M3 + 纯原生真彩终端与矢量公式渲染（零 WebView、零 GPL 依赖）",

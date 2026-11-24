@@ -1,5 +1,6 @@
 param(
-  [string]$Version = "0.3.3",
+  # Defaults to shnexVersion in mobile/android/gradle.properties (the single source of the app version).
+  [string]$Version = "",
   [switch]$SkipCoreBind
 )
 
@@ -17,6 +18,13 @@ $coreDir = Join-Path $repoRoot "core"
 $androidDir = Join-Path $repoRoot "mobile\android"
 $libsDir = Join-Path $androidDir "app\libs"
 $binDir = Join-Path $repoRoot "bin"
+
+if (-not $Version) {
+  $match = Select-String -Path (Join-Path $androidDir "gradle.properties") -Pattern '^shnexVersion=(.+)$'
+  if (-not $match) { throw "shnexVersion not found in mobile/android/gradle.properties" }
+  $Version = $match.Matches[0].Groups[1].Value.Trim()
+}
+Write-Host "==> Shnex Android version $Version"
 
 New-Item -ItemType Directory -Force -Path $libsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -40,7 +48,7 @@ if (-not $SkipCoreBind -or -not (Test-Path $aarOut)) {
 
 Write-Host "==> [2/3] Compiling Jetpack Compose Material 3 APK with Gradle 8.11.1..."
 Push-Location $androidDir
-& gradle assembleRelease
+& gradle assembleRelease "-PshnexVersion=$Version"
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 Pop-Location
 

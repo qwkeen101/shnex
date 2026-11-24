@@ -4,6 +4,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Version lives in gradle.properties (shnexVersion); -PshnexVersion=x.y.z overrides it.
+val shnexVersion = (project.findProperty("shnexVersion") as String?)?.trim()
+    ?: error("shnexVersion is not set in gradle.properties")
+val shnexVersionCode = shnexVersion.split('.').map { it.toInt() }.let { parts ->
+    require(parts.size == 3 && parts[1] < 100 && parts[2] < 100) { "shnexVersion must look like x.y.z: $shnexVersion" }
+    parts[0] * 10000 + parts[1] * 100 + parts[2]
+}
+
 android {
     namespace = "dev.shnex.app"
     compileSdk = 35
@@ -12,8 +20,8 @@ android {
         applicationId = "dev.shnex.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 312
-        versionName = "0.3.12"
+        versionCode = shnexVersionCode
+        versionName = shnexVersion
 
         ndk {
             abiFilters += listOf("arm64-v8a")
