@@ -50,6 +50,8 @@ export interface HostProfile {
   route: {
     use_tsnet?: boolean;
     proxy_url?: string;
+    /** ordered routes raced primary-first: pool proxy ids or "direct" */
+    proxy_ids?: string[];
   };
   relay: RelayConfig;
   updated_at: string;
@@ -85,6 +87,7 @@ export interface UpsertHostInput {
   route: {
     use_tsnet?: boolean;
     proxy_url?: string;
+    proxy_ids?: string[];
   };
   relay: RelayConfig;
 }
@@ -109,6 +112,9 @@ export interface SessionSummary {
   attached_clients: number;
   last_rtt_micros?: number;
   closed: boolean;
+  /** proxy route actually used, and whether it was not the primary */
+  route_via?: string;
+  route_fallback?: boolean;
 }
 
 export interface NetInterfaceStat {
@@ -1198,6 +1204,15 @@ export async function upsertNamedProxy(input: {
   password?: string;
 }): Promise<AppSettings> {
   return apiRequest<AppSettings>("/api/v1/settings/proxies", "POST", input);
+}
+
+/** Paste-to-import: one socks5:// or http:// link per line, "#name" optional. */
+export async function importProxies(text: string): Promise<{
+  settings: AppSettings;
+  imported: number;
+  errors: { line: number; error: string }[];
+}> {
+  return apiRequest("/api/v1/settings/proxies/import", "POST", { text });
 }
 
 export async function deleteNamedProxy(id: string): Promise<AppSettings> {

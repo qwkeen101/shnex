@@ -68,7 +68,20 @@ export const HostModal: React.FC<Props> = ({
   );
 
   // Network & Relay
-  const [proxyUrl, setProxyUrl] = useState(initial?.route?.proxy_url ?? "");
+  // Routes ① / ②: "" = automatic (system proxy), "direct", a pool proxy id, or "legacy"
+  // (a hand-typed proxy_url from before the pool existed, kept as is).
+  const legacyProxyUrl = initial?.route?.proxy_url ?? "";
+  const hasLegacyProxy =
+    legacyProxyUrl !== "" && legacyProxyUrl !== "direct" && legacyProxyUrl !== "system";
+  const [route1, setRoute1] = useState(() => {
+    const ids = initial?.route?.proxy_ids ?? [];
+    if (ids[0]) return ids[0];
+    if (legacyProxyUrl === "direct") return "direct";
+    return hasLegacyProxy ? "legacy" : "";
+  });
+  const [route2, setRoute2] = useState(initial?.route?.proxy_ids?.[1] ?? "");
+  const pool = settings?.proxies ?? [];
+  const canRace = route1 !== "" && route1 !== "legacy";
   const [useTsnet, setUseTsnet] = useState(initial?.route?.use_tsnet ?? false);
   const [useShnexAgent, setUseShnexAgent] = useState(
     initial?.relay?.mode === "shnex_agent"
@@ -173,7 +186,16 @@ export const HostModal: React.FC<Props> = ({
         },
         route: {
           use_tsnet: useTsnet || authMode === "tailscale_ssh",
-          proxy_url: proxyUrl.trim(),
+          proxy_url:
+            route1 === "legacy"
+              ? legacyProxyUrl
+              : route1 === "direct" && !route2
+              ? "direct"
+              : "",
+          proxy_ids:
+            canRace && (route1 !== "direct" || route2)
+              ? [route1, ...(route2 && route2 !== route1 ? [route2] : [])]
+              : [],
         },
         relay: {
           mode: relayMode,
@@ -484,15 +506,46 @@ export const HostModal: React.FC<Props> = ({
             {openNetwork && (
               <div className="p-3 rounded-xl bg-[#25262b] border border-[#32343c] space-y-2.5">
                 <div className="grid grid-cols-2 gap-2.5">
-                  <label className="space-y-1 text-[#9ca3af]">
-                    <span>代理 URL (SOCKS5 / HTTP)</span>
-                    <input
-                      value={proxyUrl}
-                      onChange={(e) => setProxyUrl(e.target.value)}
-                      placeholder="socks5://127.0.0.1:1080"
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#1b1c20] border border-[#32343c] text-white font-mono outline-none"
-                    />
-                  </label>
+                  <div className="space-y-1 text-[#9ca3af]">
+                    <span>代理 ① 主 / ② 备</span>
+                    <div className="flex gap-1.5">
+                      <select
+                        value={route1}
+                        disabled={useTsnet}
+                        onChange={(e) => {
+                          setRoute1(e.target.value);
+                          if (e.target.value === route2) setRoute2("");
+                        }}
+                        className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[#1b1c20] border border-[#32343c] text-white outline-none disabled:opacity-40"
+                      >
+                        <option value="">自动（系统代理）</option>
+                        <option value="direct">直连</option>
+                        {pool.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}
+                          </option>
+                        ))}
+                        {hasLegacyProxy && <option value="legacy">{legacyProxyUrl}</option>}
+                      </select>
+                      <select
+                        value={canRace ? route2 : ""}
+                        disabled={useTsnet || !canRace}
+                        onChange={(e) => setRoute2(e.target.value)}
+                        title="① 连不上或 3 秒没回应时，同时改走 ②，谁先通用谁"
+                        className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[#1b1c20] border border-[#32343c] text-white outline-none disabled:opacity-40"
+                      >
+                        <option value="">无备用</option>
+                        {route1 !== "direct" && <option value="direct">直连</option>}
+                        {pool
+                          .filter((p) => p.id !== route1)
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  </div>
                   <label className="space-y-1 text-[#9ca3af]">
                     <span>固定指纹 (可选 SHA256:...)</span>
                     <input

@@ -64,8 +64,8 @@ import {
   unlockVault,
   uploadWallpaperFile,
   uploadWallpaperFromLocalPath,
+  importProxies,
   upsertAIProvider,
-  upsertNamedProxy,
 } from "../api";
 
 export type SettingsCategory =
@@ -286,11 +286,9 @@ export const SettingsView: React.FC<Props> = ({
   const [credUser, setCredUser] = useState("root");
   const [credSecret, setCredSecret] = useState("");
 
-  // Proxy Form
-  const [prxName, setPrxName] = useState("");
-  const [prxScheme, setPrxScheme] = useState("socks5");
-  const [prxHost, setPrxHost] = useState("127.0.0.1");
-  const [prxPort, setPrxPort] = useState(1080);
+  // Proxy pool: paste links to import
+  const [prxLinks, setPrxLinks] = useState("");
+  const [prxMsg, setPrxMsg] = useState("");
 
   // MCP Form
   const [mcpName, setMcpName] = useState("");
@@ -2239,7 +2237,7 @@ export const SettingsView: React.FC<Props> = ({
                       代理与 Tailnet 组网
                     </h1>
                     <p className="text-[#8b909a] mt-0.5">
-                      管理 SOCKS5 / HTTP 代理池与内置用户态 Tailscale / Headscale。
+                      代理池（SOCKS5 / HTTP）与内置用户态 Tailscale / Headscale。主机在「网络」里选主备代理。
                     </p>
                   </div>
                   <button
@@ -2251,49 +2249,40 @@ export const SettingsView: React.FC<Props> = ({
                 </div>
 
                 <div className="rounded-xl bg-[#202126] border border-[#2d3039] p-4 space-y-3">
-                  <div className="grid grid-cols-4 gap-2">
-                    <input
-                      value={prxName}
-                      onChange={(e) => setPrxName(e.target.value)}
-                      placeholder="代理名称"
-                      className="px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white outline-none"
-                    />
-                    <select
-                      value={prxScheme}
-                      onChange={(e) => setPrxScheme(e.target.value)}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white outline-none"
+                  <textarea
+                    value={prxLinks}
+                    onChange={(e) => setPrxLinks(e.target.value)}
+                    rows={3}
+                    spellCheck={false}
+                    placeholder={"粘贴代理链接，每行一个\nsocks5://用户:密码@1.2.3.4:1080#香港\nhttp://127.0.0.1:7890"}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white font-mono outline-none resize-y"
+                  />
+                  <div className="flex items-center gap-3">
+                    <button
+                      disabled={!prxLinks.trim()}
+                      onClick={async () => {
+                        try {
+                          const res = await importProxies(prxLinks);
+                          onChange(res.settings);
+                          if (res.errors.length === 0) {
+                            setPrxLinks("");
+                            setPrxMsg(`已导入 ${res.imported} 个`);
+                          } else {
+                            setPrxMsg(
+                              `已导入 ${res.imported} 个；` +
+                                res.errors.map((x) => `第 ${x.line} 行：${x.error}`).join("；")
+                            );
+                          }
+                        } catch (e) {
+                          setPrxMsg((e as Error).message);
+                        }
+                      }}
+                      className="px-4 py-1.5 rounded-lg bg-[#2563eb] text-white font-medium disabled:opacity-40"
                     >
-                      <option value="socks5">SOCKS5</option>
-                      <option value="http">HTTP CONNECT</option>
-                    </select>
-                    <input
-                      value={prxHost}
-                      onChange={(e) => setPrxHost(e.target.value)}
-                      placeholder="127.0.0.1"
-                      className="px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white font-mono outline-none"
-                    />
-                    <input
-                      type="number"
-                      value={prxPort}
-                      onChange={(e) => setPrxPort(Number(e.target.value))}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#272931] border border-[#343742] text-white font-mono outline-none"
-                    />
+                      导入
+                    </button>
+                    {prxMsg && <span className="text-[12px] text-[#9ca3af]">{prxMsg}</span>}
                   </div>
-                  <button
-                    onClick={async () => {
-                      const next = await upsertNamedProxy({
-                        name: prxName || `${prxScheme}-${prxPort}`,
-                        scheme: prxScheme,
-                        host: prxHost,
-                        port: prxPort,
-                      });
-                      onChange(next);
-                      setPrxName("");
-                    }}
-                    className="px-4 py-1.5 rounded-lg bg-[#2563eb] text-white font-medium"
-                  >
-                    保存代理节点
-                  </button>
 
                   <div className="space-y-2 pt-2">
                     {settings.proxies.map((p) => (
@@ -2308,9 +2297,13 @@ export const SettingsView: React.FC<Props> = ({
                           </div>
                         </div>
                         <button
-                          onClick={async () =>
-                            onChange(await deleteNamedProxy(p.id))
-                          }
+                          onClick={async () => {
+                            try {
+                              onChange(await deleteNamedProxy(p.id));
+                            } catch (e) {
+                              setPrxMsg((e as Error).message); // e.g. still used by a host
+                            }
+                          }}
                           className="text-[#8b909a] hover:text-[#f87171]"
                         >
                           <Trash2 size={14} />

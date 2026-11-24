@@ -514,6 +514,13 @@ export const App: React.FC = () => {
     ]);
   };
 
+  // Tell the user once when the primary proxy was not usable and the backup route connected.
+  const noteRouteFallback = (summary: SessionSummary) => {
+    if (summary.route_fallback && summary.route_via) {
+      showToast("主代理不通", `已经备用「${summary.route_via}」连接`);
+    }
+  };
+
   const newTabIds = () => {
     const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     return { paneId: `pane-${sfx}`, tabId: `tab-${sfx}` };
@@ -636,6 +643,7 @@ export const App: React.FC = () => {
         relay: { mode: "tmux", session_name: remote.id, must_exist: true },
       });
       if (password) hostPasswordsRef.current[hostId] = password;
+      noteRouteFallback(summary);
       const ids = newTabIds();
       setTabs((prev) => [...prev, makeHostTab(hp, ids, summary.id, remote.title, remote.id)]);
       setActiveTabId(ids.tabId);
@@ -855,6 +863,7 @@ export const App: React.FC = () => {
         password: overridePassword ?? hostPasswordsRef.current[hp.id],
       });
       if (overridePassword) hostPasswordsRef.current[hp.id] = overridePassword;
+      noteRouteFallback(summary);
       const tmux = await detectTmuxAttach(summary);
       if (tmux) {
         const dup = tabsRef.current.find(
@@ -1302,6 +1311,7 @@ export const App: React.FC = () => {
             : { mode: "none" }
           : undefined,
       });
+      noteRouteFallback(summary);
       setTabs((prev) =>
         prev.map((t) =>
           t.tabId === tabId
